@@ -32,13 +32,13 @@ Confluence 위키 마이그레이션 및 스크립트 저장소.
 포함하려면 '.gitignore'에서 제거하고 대용량 파일에 Git LFS를 사용하는 것을 고려하세요.
 
 
-# 1) 실행 중인 down_up.py의 PID(여러개일 수 있음)
-pgrep -af down_up.py        # PID와 커맨드 라인 출력 (권장)
+# 1) 실행 중인 src/run.py의 PID(여러개일 수 있음)
+pgrep -af src/run.py        # PID와 커맨드 라인 출력 (권장)
 ps aux | grep [d]own_up.py  # ps+grep 방식 (자기 자신 grep 제외)
 
 # 2) 지금 실행하고 PID 바로 얻기 (백그라운드)
-python down_up.py & echo $!                 # 즉시 PID 출력
-nohup python down_up.py > out.log 2>&1 & echo $!  # 로그 남기며 백그라운드 실행
+python src/run.py & echo $!                 # 즉시 PID 출력
+nohup python src/run.py > out.log 2>&1 & echo $!  # 로그 남기며 백그라운드 실행
 
 # 3) (참고) 소스 수정 없이 프로세스 전체 일시정지/재개
 kill -STOP <pid>   # 일시정지
