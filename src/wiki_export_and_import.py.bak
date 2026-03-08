@@ -1,0 +1,214 @@
+"""
+Confluence Wiki Migration Tool
+================================
+기존 Confluence 위키 공간을 자동으로 export → 로컬 저장 → 새 위키 import
+
+Usage:
+  python down_and_upload_wiki.py export   [--page-id PAGE_ID] [--inline-images]
+  python down_and_upload_wiki.py import   [--inline-images]
+  python down_and_upload_wiki.py migrate  [--page-id PAGE_ID] [--inline-images]
+  python down_and_upload_wiki.py retry-gliffy
+"""
+
+import requests
+import os
+import json
+import sys
+import re
+import base64
+import logging
+import argparse
+import time
+import getpass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+from markdownify import markdownify as md_convert
+import markdown2
+import html
+from collections import defaultdict
+
+# --- 내부 sanitizer 구현 (single-file용) ----------------------------------
+class _Sanitizer:
+    """
+    페이지 storage HTML을 타깃 Confluence(예: 7.19)에 맞게 전처리합니다.
+      - remove_macro_attrs : ac:schema-version, ac:macro-id 등 문제 속성 제거
+      - sanitize_code_macros : <ac:structured-macro ac:name="code"> → <pre><code>
+      - sanitize_gliffy_macros : <ac:structured-macro ac:name="gliffy"> → <img> / <a> / 폴백
+    """
+
+    @staticmethod
+    def remove_macro_attrs(html_text):
+        out = re.sub(r'\s+ac:schema-version="[^"]+"', "", html_text, flags=re.IGNORECASE)
+        out = re.sub(r'\s+ac:macro-id="[^"]+"', "", out, flags=re.IGNORECASE)
+        return out
+
+    @staticmethod
+    def sanitize_code_macros(html_text):
+        """
+        <ac:structured-macro ac:name="code"> ... <![CDATA[...]]> ... </ac:structured-macro>
+        → <pre><code class="language-{lang}">...</code></pre>
+        """
+        # 1차: CDATA 영역까지 정확히 캡처
+        CODE_FULL_RE = re.compile(
+            r'<ac:structured-macro\b[^>]*ac:name="code"[^>]*>'
+            r'.*?'
+            r'<ac:plain-text-body>\s*<!\[CDATA\[(.*?)\]\]>\s*</ac:plain-text-body>'
+            r'.*?</ac:structured-macro>',
+            re.DOTALL | re.IGNORECASE,
+            )
+        # 언어 파라미터 추출용
+        LANG_RE = re.compile(
+            r'<ac:parameter\s+ac:name="language"\s*>(.*?)</ac:parameter>',
+            re.DOTALL | re.IGNORECASE,
+            )
+
+        def _repl_full(m):
+            code_text = m.group(1)
+            lang_m = LANG_RE.search(m.group(0))
+            lang = (lang_m.group(1).strip().lower() if lang_m else "") or "text"
+            return f'<pre style="background-color:#0a2b1d; color: #f8f8f8; padding: 15px;"><code class="language-{lang}">{html.escape(code_text)}</code></pre>'
+
+        result, n = CODE_FULL_RE.subn(_repl_full, html_text)
+        if n:
+            return result
+
+        # 2차 폴백: CDATA 없는 code 매크로
+        CODE_ANY_RE = re.compile(
+            r'<ac:structured-macro\b[^>]*ac:name="code"[^>]*>(.*?)</ac:structured-macro>',
+            re.DOTALL | re.IGNORECASE,
+            )
+
+        def _repl_any(m):
+            body = m.group(1)
+            cdata = re.search(r'<!\[CDATA\[(.*?)\]\]>', body, re.DOTALL)
+            code_text = cdata.group(1) if cdata else re.sub(r'<[^>]+>', '', body).strip()
+            lang_m = LANG_RE.search(m.group(0))
+            lang = (lang_m.group(1).strip().lower() if lang_m else "") or "text"
+            return f'<pre style="background-color:#0a2b1d; color: #f8f8f8; padding: 15px;"><code class="language-{lang}">{html.escape(code_text)}</code></pre>'
+
+        return CODE_ANY_RE.sub(_repl_any, html_text)
+
+    @staticmethod
+    def sanitize_gliffy_macros(html_text, attachments_dir=None):
+        """
+        Gliffy 매크로를 찾아 attachments 에 관련 이미지가 있으면 <img> 로 대체하고,
+        없으면 링크 또는 폴백 박스로 대체합니다.
+
+        파일명 우선순위:
+          1) gliffy_{displayName}.png  (download_gliffy_thumbnails 가 저장한 파일)
+          2) gliffy_{macroId}.png
+          3) macroId 그대로
+          4) displayName 변형 (.png / .svg / .gliffy)
+          5) attachments 내 'gliffy' 포함 파일
+        """
+        GLIFFY_RE = re.compile(
+            r'<ac:structured-macro\b[^>]*ac:name="gliffy"[^>]*>.*?</ac:structured-macro>',
+            re.DOTALL | re.IGNORECASE,
+            )
+        PARAM_RE = re.compile(
+            r'<ac:parameter\s+ac:name="([^"]+)"\s*>(.*?)</ac:parameter>',
+            re.DOTALL | re.IGNORECASE,
+            )
+
+        def _extract(macro_html):
+            return {m.group(1).strip(): m.group(2).strip()
+                    for m in PARAM_RE.finditer(macro_html)}
+
+        def _safe(s, maxlen=80):
+            return re.sub(r'[^\w\-.]', '_', s)[:maxlen]
+
+        def _repl(m):
+            params  = _extract(m.group(0))
+            display = (params.get('displayName') or params.get('name')
+                       or params.get('macroId') or 'Gliffy diagram')
+            mid     = params.get('macroId', '')
+
+            candidates = []
+            if attachments_dir and os.path.isdir(attachments_dir):
+                files     = os.listdir(attachments_dir)
+                lower_map = {fn.lower(): fn for fn in files}
+
+                # 1·2순위: download_gliffy_thumbnails 가 저장한 파일
+                for key in [f"gliffy_{_safe(display)}.png",
+                            f"gliffy_{_safe(mid)}.png" if mid else None]:
+                    if key and key.lower() in lower_map:
+                        candidates.append(lower_map[key.lower()])
+
+                # 3순위: macroId 그대로
+                if mid and mid.lower() in lower_map:
+                    candidates.append(lower_map[mid.lower()])
+
+                # 4순위: displayName 변형
+                dn = params.get('displayName', '')
+                for variant in [dn, dn + '.png', dn + '.svg', dn + '.gliffy']:
+                    if variant and variant.lower() in lower_map:
+                        candidates.append(lower_map[variant.lower()])
+
+                # 5순위: attachments 내 gliffy 포함 파일
+                for fn in files:
+                    if 'gliffy' in fn.lower() or (mid and mid.lower() in fn.lower()):
+                        candidates.append(fn)
+
+                # 이미지 확장자 우선 반환 → <ac:image> 첨부 매크로로 대체
+                for ext in ('.png', '.svg', '.jpg', '.jpeg'):
+                    for c in candidates:
+                        if c.lower().endswith(ext):
+                            # Confluence storage format: 첨부파일 이미지 참조
+                            return (
+                                f'<ac:image>'
+                                f'<ri:attachment ri:filename="{html.escape(c)}" />'
+                                f'</ac:image>'
+                            )
+                # 이미지가 없고 .gliffy 원본만 있으면 다운로드 링크
+                if candidates:
+                    return (
+                        f'<a href="./attachments/{html.escape(candidates[0])}">'
+                        f'{html.escape(display)} (diagram)</a>'
+                    )
+
+            # ── 첨부파일 전혀 없음 ──────────────────────────────────────────
+            # ⚠️  <ac:structured-macro ac:name="gliffy"> 를 그대로 두면
+            #    타깃(7.19)에 Gliffy 플러그인이 없거나 매크로 ID가 달라
+            #    "Unknown macro: gliffy" 오류가 발생하므로
+            #    안전한 HTML 폴백으로 완전히 대체합니다.
+            return (
+                f'<div class="gliffy-macro-fallback" '
+                f'style="border:1px dashed #f0a;padding:8px;background:#fff7e6;'
+                f'color:#555;font-size:0.9em;">'
+                f'⚠️ Gliffy 다이어그램: <strong>{html.escape(display)}</strong>'
+                f'<br/><small>(첨부파일 없음 — 원본 위키에서 이미지로 저장 후 재-export 권장)</small>'
+                f'</div>'
+            )
+
+        return GLIFFY_RE.sub(_repl, html_text)
+
+sanitizer = _Sanitizer()
+
+# ─── 설정 ───────────────────────────────────────────────────────────────────
+OLD_BASE = "https://wiki.11stcorp.com"
+NEW_BASE = "https://wiki.skplanet.com"
+
+# 새 위키에서 최상위 부모로 지정할 페이지 ID (없으면 None)
+NEW_PARENT_PAGE_ID = "728909587"
+
+OLD_USER = os.getenv("O_USER")
+OLD_PASS = os.getenv("O_PASS")
+
+NEW_USER = os.getenv("N_USER")
+NEW_PASS = os.getenv("N_PASS")
+
+SPACE = "GFTCDEV"          # 기존 위키 Space Key (export 대상)
+NEW_SPACE = "~1004592"    # 새 위키 Space Key  (import 대상)
+
+EXPORT_DIR = "../wiki_down_upload_export"
+FAILED_GLIFFY_LOG = os.path.join(EXPORT_DIR, "failed_gliffy.json")
+
+# 동시 다운로드 스레드 수
+MAX_WORKERS = 8
+
+# 재시도 횟수 / 대기 시간(초)
+MAX_RETRIES = 5
+RETRY_DELAY = 2
+
+# ... (백업 파일에 원본 전체 내용을 그대로 저장)
+
