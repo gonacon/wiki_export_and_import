@@ -2,37 +2,50 @@ import os
 import logging
 import sys
 import requests
+import threading
 
-# 기본 설정
-OLD_BASE = os.getenv("OLD_BASE", "https://wiki.11stcorp.com")
-NEW_BASE = os.getenv("NEW_BASE", "https://wiki.skplanet.com")
-# NEW_PARENT_PAGE_ID = os.getenv("NEW_PARENT_PAGE_ID", "728909587")
-NEW_PARENT_PAGE_ID = os.getenv("NEW_PARENT_PAGE_ID", "")
+class Config:
+    def __init__(self):
+        # 기본값 (환경변수 우선)
+        self.lock = threading.RLock()
+        self.OLD_BASE = os.getenv("OLD_BASE", "https://wiki.11stcorp.com")
+        self.NEW_BASE = os.getenv("NEW_BASE", "https://wiki.skplanet.com")
+        self.NEW_PARENT_PAGE_ID = os.getenv("NEW_PARENT_PAGE_ID", "")
 
-OLD_USER = os.getenv("O_USER")
-OLD_PASS = os.getenv("O_PASS")
-NEW_USER = os.getenv("N_USER")
-NEW_PASS = os.getenv("N_PASS")
+        self.OLD_USER = os.getenv("O_USER")
+        self.OLD_PASS = os.getenv("O_PASS")
+        self.NEW_USER = os.getenv("N_USER")
+        self.NEW_PASS = os.getenv("N_PASS")
 
-SPACE = os.getenv("SPACE", "GFTCDEV")
-NEW_SPACE = os.getenv("NEW_SPACE", "~1004592")
+        self.SPACE = os.getenv("SPACE", "GFTCDEV")
+        self.NEW_SPACE = os.getenv("NEW_SPACE", "~1004592")
 
-EXPORT_DIR = os.getenv("EXPORT_DIR", "../wiki_down_upload_export")
-FAILED_GLIFFY_LOG = os.path.join(EXPORT_DIR, "failed_gliffy.json")
-RESUME_FILE = os.path.join(EXPORT_DIR, "resume_state.json")
+        self.EXPORT_DIR = os.getenv("EXPORT_DIR", "../wiki_down_upload_export")
+        self.FAILED_GLIFFY_LOG = os.path.join(self.EXPORT_DIR, "failed_gliffy.json")
+        self.RESUME_FILE = os.path.join(self.EXPORT_DIR, "resume_state.json")
 
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
-RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
+        self.MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
+        self.MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+        self.RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
 
-# 세션
-old_session = requests.Session()
-new_session = requests.Session()
+        # Sessions (shared)
+        self.old_session = requests.Session()
+        self.new_session = requests.Session()
 
-# 로거 설정
+        # logger will be set later when config object created
+        self.logger = None
 
-def setup_logger():
-    os.makedirs(EXPORT_DIR, exist_ok=True)
+    def ensure_dirs(self):
+        os.makedirs(self.EXPORT_DIR, exist_ok=True)
+
+
+# 글로벌 인스턴스
+cfg = Config()
+
+# 로거 설정 (모듈 레벨로 설정하여 동일 로거를 공유)
+def setup_logger(cfg_obj=None):
+    c = cfg_obj or cfg
+    c.ensure_dirs()
     logger = logging.getLogger("wiki_migrate")
     logger.setLevel(logging.DEBUG)
 
@@ -42,14 +55,28 @@ def setup_logger():
     ch.setLevel(logging.INFO)
     ch.setFormatter(fmt)
 
-    fh = logging.FileHandler(os.path.join(EXPORT_DIR, "migrate.log"), encoding="utf-8")
+    fh = logging.FileHandler(os.path.join(c.EXPORT_DIR, "migrate.log"), encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
 
-    # 중복 핸들러 추가 방지
     if not logger.handlers:
         logger.addHandler(ch)
         logger.addHandler(fh)
+
+    c.logger = logger
     return logger
 
-logger = setup_logger()
+# 초기화
+logger = setup_logger(cfg)
+
+# 편의용: 모듈 레벨 이름(기존 코드가 직접 import한 경우를 최소화하기 위해 권장하지 않지만 남겨둠)
+old_session = cfg.old_session
+new_session = cfg.new_session
+EXPORT_DIR = cfg.EXPORT_DIR
+OLD_BASE = cfg.OLD_BASE
+NEW_BASE = cfg.NEW_BASE
+MAX_WORKERS = cfg.MAX_WORKERS
+MAX_RETRIES = cfg.MAX_RETRIES
+RETRY_DELAY = cfg.RETRY_DELAY
+FAILED_GLIFFY_LOG = cfg.FAILED_GLIFFY_LOG
+RESUME_FILE = cfg.RESUME_FILE

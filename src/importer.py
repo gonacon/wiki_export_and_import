@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from .config import NEW_BASE, NEW_SPACE, NEW_PARENT_PAGE_ID, new_session, EXPORT_DIR
+from . import config
 from .sanitizer import Sanitizer
 from .io_utils import load_resume_state, save_resume_state
 from .utils import markdown_to_confluence_html, convert_local_imgs_to_acimage, convert_data_uri_imgs_to_acimage
@@ -10,10 +10,10 @@ logger = logging.getLogger('wiki_migrate')
 
 
 def get_page_by_title(title):
-    url = f"{NEW_BASE}/rest/api/content"
-    params = {"title": title, "spaceKey": NEW_SPACE, "expand": "version"}
+    url = f"{config.NEW_BASE}/rest/api/content"
+    params = {"title": title, "spaceKey": config.NEW_SPACE, "expand": "version"}
     try:
-        r = new_session.get(url, params=params, timeout=10)
+        r = config.new_session.get(url, params=params, timeout=10)
         r.raise_for_status()
         resp = r.json()
         if resp.get('results'):
@@ -24,19 +24,19 @@ def get_page_by_title(title):
 
 
 def update_page(page_id, title, body_html, parent=None):
-    url = f"{NEW_BASE}/rest/api/content/{page_id}"
-    r = new_session.get(url, params={'expand': 'version'}, timeout=10)
+    url = f"{config.NEW_BASE}/rest/api/content/{page_id}"
+    r = config.new_session.get(url, params={'expand': 'version'}, timeout=10)
     r.raise_for_status()
     resp = r.json()
     current_version = resp['version']['number']
     update_data = {
-        'type': 'page', 'title': title, 'space': {'key': NEW_SPACE},
+        'type': 'page', 'title': title, 'space': {'key': config.NEW_SPACE},
         'body': {'storage': {'value': body_html, 'representation': 'storage'}},
         'version': {'number': current_version + 1}
     }
     if parent:
         update_data['ancestors'] = [{'id': parent}]
-    r = new_session.put(url, json=update_data)
+    r = config.new_session.put(url, json=update_data)
     resp = r.json()
     if 'id' not in resp:
         raise RuntimeError(f"페이지 업데이트 실패: {resp}")
@@ -48,11 +48,11 @@ def create_page(title, body_html, parent=None):
     if existing:
         logger.debug(f"기존 페이지 발견 [{title}] (ID: {existing['id']}) → 업데이트")
         return update_page(existing['id'], title, body_html, parent)
-    url = f"{NEW_BASE}/rest/api/content"
-    data = {'type': 'page', 'title': title, 'space': {'key': NEW_SPACE}, 'body': {'storage': {'value': body_html, 'representation': 'storage'}}}
+    url = f"{config.NEW_BASE}/rest/api/content"
+    data = {'type': 'page', 'title': title, 'space': {'key': config.NEW_SPACE}, 'body': {'storage': {'value': body_html, 'representation': 'storage'}}}
     if parent:
         data['ancestors'] = [{'id': parent}]
-    r = new_session.post(url, json=data)
+    r = config.new_session.post(url, json=data)
     resp = r.json()
     if 'id' not in resp:
         raise RuntimeError(f"페이지 생성 실패: {resp}")
@@ -65,10 +65,10 @@ def upload_attachments(page_id, folder):
         return
     for fname in os.listdir(att_path):
         file_path = os.path.join(att_path, fname)
-        url = f"{NEW_BASE}/rest/api/content/{page_id}/child/attachment"
+        url = f"{config.NEW_BASE}/rest/api/content/{page_id}/child/attachment"
         try:
             with open(file_path, 'rb') as f:
-                new_session.post(url, files={'file': (fname, f)}, headers={'X-Atlassian-Token': 'no-check'})
+                config.new_session.post(url, files={'file': (fname, f)}, headers={'X-Atlassian-Token': 'no-check'})
             logger.debug(f"첨부파일 업로드: {fname}")
         except Exception as e:
             logger.error(f"첨부파일 업로드 실패 [{fname}]: {e}")
@@ -77,7 +77,7 @@ def upload_attachments(page_id, folder):
 def import_all(inline_images=False, force_update=False):
     resume_state = load_resume_state()
     page_map = resume_state.get('page_map', {})
-    pages_dir = os.path.join(EXPORT_DIR, 'pages')
+    pages_dir = os.path.join(config.EXPORT_DIR, 'pages')
     if not os.path.exists(pages_dir):
         logger.error(f"pages 디렉토리가 없습니다: {pages_dir}")
         return
@@ -97,8 +97,8 @@ def import_all(inline_images=False, force_update=False):
         parent_new_id = None
         if meta.get('parent') and str(meta['parent']) in page_map:
             parent_new_id = page_map[str(meta['parent'])]
-        elif not meta.get('parent') and NEW_PARENT_PAGE_ID:
-            parent_new_id = NEW_PARENT_PAGE_ID
+        elif not meta.get('parent') and config.NEW_PARENT_PAGE_ID:
+            parent_new_id = config.NEW_PARENT_PAGE_ID
         placeholder_html = '<p>Uploading attachments...</p>'
         try:
             new_id = create_page(meta['title'], placeholder_html, parent=parent_new_id)
@@ -165,8 +165,7 @@ def import_all(inline_images=False, force_update=False):
             logger.error(f"업로드 실패 [{meta['title']}]: {e}")
             failed_uploads.append({'id': old_id, 'title': meta['title'], 'error': str(e)})
     if failed_uploads:
-        with open(os.path.join(EXPORT_DIR, 'failed_uploads.json'), 'w', encoding='utf-8') as f:
+        with open(os.path.join(config.EXPORT_DIR, 'failed_uploads.json'), 'w', encoding='utf-8') as f:
             json.dump(failed_uploads, f, ensure_ascii=False, indent=2)
-        logger.warning(f"실패한 업로드 {len(failed_uploads)}개 → {os.path.join(EXPORT_DIR, 'failed_uploads.json')}")
+        logger.warning(f"실패한 업로드 {len(failed_uploads)}개 → {os.path.join(config.EXPORT_DIR, 'failed_uploads.json')}")
     logger.info('Import 완료')
-

@@ -5,7 +5,7 @@ from tqdm import tqdm
 from .config import OLD_BASE, old_session, EXPORT_DIR, MAX_WORKERS, MAX_RETRIES, RETRY_DELAY
 from .utils import safe_folder_name, fix_image_links_html
 from .sanitizer import Sanitizer
-from .io_utils import save_page_files, download_attachments_for_page, load_resume_state, save_resume_state, ensure_export_pages_dir
+from .io_utils import save_page_files, download_attachments_for_page, load_resume_state, save_resume_state, ensure_export_pages_dir, download_gliffy_thumbnails
 import logging
 
 logger = logging.getLogger("wiki_migrate")
@@ -96,7 +96,11 @@ def process_page(i, page, inline_images, resume_state, old_session=old_session):
         markdown = md_convert(html_local, heading_style='ATX') if 'md_convert' in globals() else html_local
         folder = save_page_files(page, i, html, markdown)
         download_attachments_for_page(page, folder)
-        # Gliffy thumbnails handled elsewhere
+        # Gliffy: 썸네일 다운로드 호출
+        try:
+            download_gliffy_thumbnails(page, folder)
+        except Exception:
+            logger.debug('Gliffy thumbnail download failed for page %s', page.get('title'))
         if inline_images:
             md_path = os.path.join(folder, 'page.md')
             if os.path.exists(md_path):
@@ -132,4 +136,3 @@ def export_all(old_session, OLD_BASE, SPACE, root_page_id=None, inline_images=Fa
             json.dump(failed, f, ensure_ascii=False, indent=2)
         logger.warning(f"실패한 페이지 {len(failed)}개")
     logger.info('Export 완료')
-
