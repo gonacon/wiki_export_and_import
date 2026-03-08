@@ -2,7 +2,7 @@
 Legacy wrapper that exposes the original CLI while delegating functionality
 to the refactored modules: config, exporter, importer, sanitizer, utils.
 The original single-file implementation is preserved as a backup at
-`wiki_export_and_import.py.bak`.
+`wiki_export_and_import.py`.
 """
 
 from .config import OLD_BASE, NEW_BASE, OLD_USER, OLD_PASS, NEW_USER, NEW_PASS, SPACE, NEW_SPACE, EXPORT_DIR
