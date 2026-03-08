@@ -1,0 +1,26 @@
+.DS_Store
+.idea/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.log
+*.zip
+*.iml
+*.env
+.env
+wiki_down_upload_export/
+node_modules/
+*.sqlite3
+# macOS
+.Trashes
+
+# JetBrains
+/out/
+
+# Virtual environment
+
+# VSCode
+.vscode/
+
