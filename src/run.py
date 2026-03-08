@@ -5,13 +5,28 @@ The original single-file implementation is preserved as a backup at
 `wiki_export_and_import.py`.
 """
 
-from .config import OLD_BASE, NEW_BASE, OLD_USER, OLD_PASS, NEW_USER, NEW_PASS, SPACE, NEW_SPACE, EXPORT_DIR
-from .exporter import export_all
-from .importer import import_all
-from .config import old_session, new_session
 import argparse
 import sys
+import os
 import getpass
+
+# Ensure project root is on sys.path so `import src.*` works when running this file directly
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+import src.config as config_module
+from src.exporter import export_all
+from src.importer import import_all
+
+# central config instance
+config = config_module
+cfg = config.cfg
+
+# convenience aliases for sessions
+old_session = cfg.old_session
+new_session = cfg.new_session
 
 
 def ask(prompt, default=None):
@@ -70,36 +85,36 @@ def interactive_menu():
     global OLD_USER, OLD_PASS, NEW_USER, NEW_PASS, SPACE, NEW_SPACE, NEW_PARENT_PAGE_ID, EXPORT_DIR, MAX_WORKERS
 
     if mode in ("export", "migrate", "retry-gliffy"):
-        env_user = OLD_USER or ""
-        env_pass = OLD_PASS or ""
+        env_user = cfg.OLD_USER or ""
+        env_pass = cfg.OLD_PASS or ""
         if env_user and env_pass:
             print(f"  환경변수 O_USER / O_PASS 감지됨 → 자동 사용")
         else:
-            cfg_user = ask("  기존 위키 아이디", default=OLD_USER or "")
-            cfg_pass = getpass.getpass("  기존 위키 비밀번호: ") or OLD_PASS
-            OLD_USER = cfg_user
-            OLD_PASS = cfg_pass
+            cfg_user = ask("  기존 위키 아이디", default=cfg.OLD_USER or "")
+            cfg_pass = getpass.getpass("  기존 위키 비밀번호: ") or cfg.OLD_PASS
+            cfg.OLD_USER = cfg_user
+            cfg.OLD_PASS = cfg_pass
 
     if mode in ("import", "migrate"):
-        env_user = NEW_USER or ""
-        env_pass = NEW_PASS or ""
+        env_user = cfg.NEW_USER or ""
+        env_pass = cfg.NEW_PASS or ""
         if env_user and env_pass:
             print(f"  환경변수 N_USER / N_PASS 감지됨 → 자동 사용")
         else:
-            cfg_user = ask("  새 위키 아이디", default=NEW_USER or "")
-            cfg_pass = getpass.getpass("  새 위키 비밀번호: ") or NEW_PASS
-            NEW_USER = cfg_user
-            NEW_PASS = cfg_pass
+            cfg_user = ask("  새 위키 아이디", default=cfg.NEW_USER or "")
+            cfg_pass = getpass.getpass("  새 위키 비밀번호: ") or cfg.NEW_PASS
+            cfg.NEW_USER = cfg_user
+            cfg.NEW_PASS = cfg_pass
 
     # 기본 설정
     if mode in ("export", "migrate"):
-        SPACE = ask("  기존 위키 Space Key", default=SPACE)
+        cfg.SPACE = ask("  기존 위키 Space Key", default=cfg.SPACE)
     if mode in ("import", "migrate"):
-        NEW_SPACE = ask("  새 위키 Space Key", default=NEW_SPACE)
+        cfg.NEW_SPACE = ask("  새 위키 Space Key", default=cfg.NEW_SPACE)
         parent_input = ask("  새 위키 부모 페이지 ID (없으면 Space 최상위)", default=None)
-        NEW_PARENT_PAGE_ID = parent_input if parent_input else None
+        cfg.NEW_PARENT_PAGE_ID = parent_input if parent_input else None
 
-    EXPORT_DIR = ask("  로컬 저장 경로", default=EXPORT_DIR)
+    cfg.EXPORT_DIR = ask("  로컬 저장 경로", default=cfg.EXPORT_DIR)
 
     page_id = None
     if mode in ("export", "migrate"):
@@ -114,12 +129,12 @@ def interactive_menu():
     if mode in ("export", "migrate"):
         inline_images = ask_yes_no("  이미지를 base64 inline으로 변환할까요?", default=False)
 
-    workers_str = ask("  병렬 다운로드 스레드 수", default=str(8))
+    workers_str = ask("  병렬 다운로드 스레드 수", default=str(cfg.MAX_WORKERS))
     try:
-        MAX_WORKERS = int(workers_str)
+        cfg.MAX_WORKERS = int(workers_str)
     except ValueError:
         print("⚠️  숫자가 아니므로 기본값 8 사용")
-        MAX_WORKERS = 8
+        cfg.MAX_WORKERS = 8
 
     force_update = False
     if mode in ("import", "migrate"):
@@ -139,25 +154,25 @@ def main():
         mode, page_id, inline_images, force_update = interactive_menu()
 
         if mode == "export":
-            login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
-            export_all(old_session, OLD_BASE, SPACE, root_page_id=page_id, inline_images=inline_images)
+            login(old_session, cfg.OLD_BASE, cfg.OLD_USER, cfg.OLD_PASS)
+            export_all(old_session, cfg.OLD_BASE, cfg.SPACE, root_page_id=page_id, inline_images=inline_images)
 
         elif mode == "import":
-            login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+            login(new_session, cfg.NEW_BASE, cfg.NEW_USER, cfg.NEW_PASS)
             import src.importer as importer_mod
             importer_mod.config = config
             import_all(inline_images=inline_images, force_update=force_update)
 
         elif mode == "migrate":
-            login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
-            login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
-            export_all(old_session, OLD_BASE, SPACE, root_page_id=page_id, inline_images=inline_images)
+            login(old_session, cfg.OLD_BASE, cfg.OLD_USER, cfg.OLD_PASS)
+            login(new_session, cfg.NEW_BASE, cfg.NEW_USER, cfg.NEW_PASS)
+            export_all(old_session, cfg.OLD_BASE, cfg.SPACE, root_page_id=page_id, inline_images=inline_images)
             import src.importer as importer_mod
             importer_mod.config = config
             import_all(inline_images=inline_images, force_update=force_update)
 
         elif mode == "retry-gliffy":
-            login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
+            login(old_session, cfg.OLD_BASE, cfg.OLD_USER, cfg.OLD_PASS)
             import src.io_utils as io_mod
             io_mod.retry_failed_gliffy()
 
@@ -180,25 +195,25 @@ def main():
     MAX_WORKERS = args.workers
 
     if args.mode == 'export':
-        login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
-        export_all(old_session, OLD_BASE, SPACE, root_page_id=args.page_id, inline_images=args.inline_images)
+        login(old_session, cfg.OLD_BASE, cfg.OLD_USER, cfg.OLD_PASS)
+        export_all(old_session, cfg.OLD_BASE, cfg.SPACE, root_page_id=args.page_id, inline_images=args.inline_images)
 
     elif args.mode == 'import':
-        login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+        login(new_session, cfg.NEW_BASE, cfg.NEW_USER, cfg.NEW_PASS)
         import src.importer as importer_mod
         importer_mod.config = config
         import_all(inline_images=args.inline_images, force_update=args.force_update)
 
     elif args.mode == 'migrate':
-        login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
-        login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
-        export_all(old_session, OLD_BASE, SPACE, root_page_id=args.page_id, inline_images=args.inline_images)
+        login(old_session, cfg.OLD_BASE, cfg.OLD_USER, cfg.OLD_PASS)
+        login(new_session, cfg.NEW_BASE, cfg.NEW_USER, cfg.NEW_PASS)
+        export_all(old_session, cfg.OLD_BASE, cfg.SPACE, root_page_id=args.page_id, inline_images=args.inline_images)
         import src.importer as importer_mod
         importer_mod.config = config
         import_all(inline_images=args.inline_images, force_update=args.force_update)
 
     elif args.mode == 'retry-gliffy':
-        login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
+        login(old_session, cfg.OLD_BASE, cfg.OLD_USER, cfg.OLD_PASS)
         import src.io_utils as io_mod
         io_mod.retry_failed_gliffy()
 
