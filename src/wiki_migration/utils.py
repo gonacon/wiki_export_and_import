@@ -250,3 +250,159 @@ def fix_url_images_in_html(html_text, attachments_dir, session):
         logger.info(f"총 {len(downloaded_files)}개 URL 이미지 다운로드 완료")
 
     return converted_html
+
+# utils.py - 맨 끝에 추가
+
+def convert_internal_links_with_pageid(html_text, old_base, new_base, page_map, pages_info=None, current_page_old_id=None):
+    """
+    내부 링크를 새 wiki의 pageId로 변환
+
+    Args:
+        html_text: HTML 내용
+        old_base: 기존 wiki URL (예: https://wiki.11stcorp.com)
+        new_base: 새 wiki URL (예: https://wiki.skplanet.com)
+        page_map: old_id → new_id 매핑 dict
+        pages_info: 페이지 정보 dict (optional, 첨부파일 소유 페이지 확인용)
+        current_page_old_id: 현재 페이지의 old ID (optional)
+
+    Returns:
+        변환된 HTML
+    """
+    import re
+    from urllib.parse import urlparse, parse_qs
+
+    link_pattern = re.compile(
+        r'<a\s+([^>]*\s+)?href=(["\'])(' + re.escape(old_base) + r'/[^"\']*)\2([^>]*)>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL
+    )
+
+    converted_count = {'page': 0, 'attachment': 0, 'attachment_cross': 0, 'display': 0}
+    failed_links = []
+
+    def replace_link(match):
+        pre_attrs = match.group(1) or ''
+        quote = match.group(2)
+        url = match.group(3)
+        post_attrs = match.group(4) or ''
+        link_text = match.group(5)
+
+        try:
+            parsed = urlparse(url)
+
+            # ========================================
+            # 1. 페이지 링크: viewpage.action?pageId=123
+            # ========================================
+            if 'viewpage.action' in parsed.path:
+                query_params = parse_qs(parsed.query)
+                old_page_id = query_params.get('pageId', [None])[0]
+
+                if old_page_id:
+                    new_page_id = page_map.get(str(old_page_id))
+
+                    if new_page_id:
+                        new_url = f"{new_base}/pages/viewpage.action?pageId={new_page_id}"
+                        new_link = f'<a {pre_attrs}href={quote}{new_url}{quote}{post_attrs}>{link_text}</a>'
+                        converted_count['page'] += 1
+                        logger.debug(f"페이지 링크 변환: {old_page_id} → {new_page_id}")
+                        return new_link
+                    else:
+                        logger.warning(f"링크 대상 미import: pageId={old_page_id}")
+                        failed_links.append(('page', old_page_id))
+                        return f'<span style="background-color: #fff3cd; padding: 2px 4px;" title="원본 페이지 ID: {old_page_id}">{link_text}</span>'
+
+            # ========================================
+            # 2. 첨부파일 링크: /download/attachments/123/file.jpg
+            # ========================================
+            elif '/download/attachments/' in parsed.path:
+                path_parts = parsed.path.split('/')
+                if len(path_parts) >= 4:
+                    attachment_owner_page_id = path_parts[3]  # 첨부파일이 있는 페이지 ID
+                    filename_encoded = path_parts[4] if len(path_parts) > 4 else None
+
+                    if filename_encoded:
+                        filename = unquote(filename_encoded).split('?')[0]
+
+                        # 현재 페이지의 첨부파일인지 확인
+                        is_same_page = (str(current_page_old_id) == str(attachment_owner_page_id))
+
+                        if is_same_page:
+                            # Case 1: 같은 페이지의 첨부파일
+                            new_link = (
+                                f'<ac:link>'
+                                f'<ri:attachment ri:filename="{html.escape(filename)}" />'
+                                f'<ac:link-body>{link_text}</ac:link-body>'
+                                f'</ac:link>'
+                            )
+                            converted_count['attachment'] += 1
+                            logger.debug(f"첨부파일 링크 변환 (같은 페이지): {filename}")
+                        else:
+                            # Case 2: 다른 페이지의 첨부파일
+                            if pages_info and attachment_owner_page_id in pages_info:
+                                owner_page_title = pages_info[attachment_owner_page_id]['meta']['title']
+
+                                new_link = (
+                                    f'<ac:link>'
+                                    f'<ri:attachment ri:filename="{html.escape(filename)}">'
+                                    f'<ri:page ri:content-title="{html.escape(owner_page_title)}" />'
+                                    f'</ri:attachment>'
+                                    f'<ac:link-body>{link_text}</ac:link-body>'
+                                    f'</ac:link>'
+                                )
+                                converted_count['attachment_cross'] += 1
+                                logger.debug(f"첨부파일 링크 변환 (다른 페이지): {filename} from {owner_page_title}")
+                            else:
+                                # 페이지 정보 없으면 현재 페이지로 가정 (fallback)
+                                logger.warning(f"첨부파일 소유 페이지 정보 없음: {attachment_owner_page_id}, 현재 페이지로 가정")
+                                new_link = (
+                                    f'<ac:link>'
+                                    f'<ri:attachment ri:filename="{html.escape(filename)}" />'
+                                    f'<ac:link-body>{link_text}</ac:link-body>'
+                                    f'</ac:link>'
+                                )
+                                converted_count['attachment'] += 1
+
+                        return new_link
+
+                logger.warning(f"첨부파일 링크 파싱 실패: {url}")
+                return match.group(0)
+
+            # ========================================
+            # 3. Display 링크: /display/SPACE/PageTitle
+            # ========================================
+            elif '/display/' in parsed.path:
+                new_url = url.replace(old_base, new_base)
+                new_link = f'<a {pre_attrs}href={quote}{new_url}{quote}{post_attrs}>{link_text}</a>'
+                converted_count['display'] += 1
+                logger.debug(f"display 링크 도메인 변경")
+                return new_link
+
+            # ========================================
+            # 4. 기타 내부 링크
+            # ========================================
+            else:
+                logger.debug(f"기타 내부 링크 유지: {parsed.path}")
+                return match.group(0)
+
+        except Exception as e:
+            logger.warning(f"링크 변환 중 오류: {url}, {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return match.group(0)
+
+    # 변환 실행
+    converted_html = link_pattern.sub(replace_link, html_text)
+
+    # 결과 로그
+    total = sum(converted_count.values())
+    if total > 0:
+        logger.info(
+            f"내부 링크 변환: "
+            f"페이지={converted_count['page']}, "
+            f"첨부파일(같은페이지)={converted_count['attachment']}, "
+            f"첨부파일(다른페이지)={converted_count['attachment_cross']}, "
+            f"display={converted_count['display']}"
+        )
+    if failed_links:
+        logger.warning(f"변환 실패: {failed_links[:10]}")
+
+    return converted_html

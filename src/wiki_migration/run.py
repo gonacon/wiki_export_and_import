@@ -9,7 +9,7 @@ from .config import (
     SPACE, NEW_SPACE, EXPORT_DIR, NEW_PARENT_PAGE_ID, logger
 )
 from .exporter import export_all
-from .importer import import_all
+from .importer import import_all, import_all_two_pass
 from .config import old_session, new_session
 import argparse
 import sys
@@ -143,6 +143,10 @@ def interactive_mode():
         inline_images_import = get_yes_no("이미지를 base64 인라인으로 변환하시겠습니까?", default=False)
         force_update = get_yes_no("이미 업로드된 페이지도 다시 업로드하시겠습니까?", default=False)
         print()
+
+        # ✨ 2-Pass 옵션 추가
+        use_two_pass = get_yes_no("2-Pass Import를 사용하시겠습니까? (내부 링크 변환 개선)", default=True)
+        print()
     else:
         import_root_page_id = None
         target_parent_id = None
@@ -184,12 +188,21 @@ def interactive_mode():
                        inline_images=inline_images_export)
 
         elif mode == 'import':
-            import_all(
-                inline_images=inline_images_import,
-                force_update=force_update,
-                root_page_id=import_root_page_id,
-                target_parent_id=target_parent_id
-            )
+            if use_two_pass:
+                logger.info("2-Pass Import 모드로 실행합니다.")
+                import_all_two_pass(
+                    inline_images=inline_images_import,
+                    force_update=force_update,
+                    root_page_id=import_root_page_id,
+                    target_parent_id=target_parent_id
+                )
+            else:
+                import_all(
+                    inline_images=inline_images_import,
+                    force_update=force_update,
+                    root_page_id=import_root_page_id,
+                    target_parent_id=target_parent_id
+                )
 
         elif mode == 'migrate':
             # Export
@@ -230,8 +243,8 @@ def main():
     )
 
     # 선택적 인자들
-    parser.add_argument('mode', nargs='?', choices=['export', 'import', 'migrate', 'retry-gliffy'],
-                        help='작업 모드 (생략 시 대화형 모드)')
+    parser.add_argument('mode', nargs='?', choices=['export', 'import', 'import2', 'migrate', 'retry-gliffy'],
+                        help='작업 모드 (import2 = 2-Pass Import, 생략 시 대화형 모드)')
     parser.add_argument('--page-id', default=None,
                         help='루트 페이지 ID (export/import 대상)')
     parser.add_argument('--parent-id', default=None,
@@ -244,6 +257,8 @@ def main():
                         help='이미 업로드된 페이지도 재업로드')
     parser.add_argument('--non-interactive', action='store_true',
                         help='비대화형 모드 (명령줄 인자만 사용)')
+    parser.add_argument('--two-pass', action='store_true',
+                        help='2-Pass Import 사용 (링크 변환 개선)')
 
     args = parser.parse_args()
 
@@ -258,24 +273,47 @@ def main():
                        root_page_id=args.page_id,
                        inline_images=args.inline_images)
 
-        elif args.mode == 'import':
-            import_all(
-                inline_images=args.inline_images,
-                force_update=args.force_update,
-                root_page_id=args.page_id,
-                target_parent_id=args.parent_id
-            )
+        elif args.mode == 'import' or args.mode == 'import2':
+            # import2 또는 --two-pass 플래그가 있으면 2-Pass Import
+            if args.mode == 'import2' or args.two_pass:
+                logger.info("2-Pass Import 모드로 실행합니다.")
+                import_all_two_pass(
+                    inline_images=args.inline_images,
+                    force_update=args.force_update,
+                    root_page_id=args.page_id,
+                    target_parent_id=args.parent_id
+                )
+            else:
+                # 기존 1-Pass Import
+                logger.info("1-Pass Import 모드로 실행합니다.")
+                import_all(
+                    inline_images=args.inline_images,
+                    force_update=args.force_update,
+                    root_page_id=args.page_id,
+                    target_parent_id=args.parent_id
+                )
 
         elif args.mode == 'migrate':
             export_all(old_session, OLD_BASE, SPACE,
                        root_page_id=args.page_id,
                        inline_images=args.inline_images)
-            import_all(
-                inline_images=args.inline_images,
-                force_update=args.force_update,
-                root_page_id=args.page_id,
-                target_parent_id=args.parent_id
-            )
+
+            # migrate도 2-Pass 옵션 지원
+            if args.two_pass:
+                logger.info("2-Pass Import 모드로 실행합니다.")
+                import_all_two_pass(
+                    inline_images=args.inline_images,
+                    force_update=args.force_update,
+                    root_page_id=args.page_id,
+                    target_parent_id=args.parent_id
+                )
+            else:
+                import_all(
+                    inline_images=args.inline_images,
+                    force_update=args.force_update,
+                    root_page_id=args.page_id,
+                    target_parent_id=args.parent_id
+                )
 
         elif args.mode == 'retry-gliffy':
             print('retry-gliffy not implemented in refactor wrapper')

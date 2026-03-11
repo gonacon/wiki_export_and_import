@@ -361,3 +361,425 @@ def import_all(inline_images=False, force_update=False, root_page_id=None, targe
         logger.warning(f"실패한 업로드 {len(failed_uploads)}개 → {os.path.join(EXPORT_DIR, 'failed_uploads.json')}")
 
     logger.info(f'Import 완료: {uploaded_count_ref[0]}개 페이지 업로드')
+
+# importer.py - import_all 함수 다음에 추가
+
+def import_all_two_pass(inline_images=False, force_update=False, root_page_id=None, target_parent_id=None):
+    """
+    2-Pass Import: 1차로 모든 페이지 생성, 2차로 내용 + 링크 업데이트
+
+    Args:
+        inline_images: 이미지를 인라인으로 변환할지 여부
+        force_update: 이미 업로드된 페이지도 다시 업로드할지 여부
+        root_page_id: import할 루트 페이지 ID
+        target_parent_id: 새 wiki에서 부모로 지정할 페이지 ID
+    """
+    from .utils import convert_internal_links_with_pageid
+    from .config import OLD_BASE, NEW_BASE
+
+    resume_state = load_resume_state()
+    page_map = resume_state.get('page_map', {})
+    pages_dir = os.path.join(EXPORT_DIR, 'pages')
+
+    if not os.path.exists(pages_dir):
+        logger.error(f"pages 디렉토리가 없습니다: {pages_dir}")
+        return
+
+    # 페이지 계층 구조 파악
+    logger.info("페이지 계층 구조 분석 중...")
+    pages_info = build_page_hierarchy(pages_dir)
+
+    # import할 페이지 목록 결정
+    if root_page_id:
+        logger.info(f"루트 페이지 {root_page_id}와 하위 페이지들을 import합니다.")
+        page_ids_to_import = get_descendant_page_ids(pages_info, root_page_id)
+        logger.info(f"총 {len(page_ids_to_import)}개 페이지를 import합니다.")
+    else:
+        logger.info("모든 페이지를 import합니다.")
+        page_ids_to_import = list(pages_info.keys())
+
+    # 부모 페이지 ID 결정
+    parent_id = target_parent_id or NEW_PARENT_PAGE_ID
+
+    failed_uploads = []
+
+    # ========================================
+    # PASS 1: 페이지 구조 생성 (빈 페이지)
+    # ========================================
+    logger.info("=" * 60)
+    logger.info("PASS 1: 페이지 구조 생성 중...")
+    logger.info("=" * 60)
+
+    pass1_count = [0]
+
+    def create_page_structure(old_id, parent_new_id):
+        """Pass 1: 페이지 구조만 생성 (내용은 placeholder)"""
+        if old_id not in pages_info:
+            return
+
+        info = pages_info[old_id]
+        meta = info['meta']
+
+        # 이미 생성된 경우 skip
+        if str(old_id) in page_map and not force_update:
+            new_id = page_map[str(old_id)]
+            logger.debug(f"Pass1 skip (이미 생성됨): {meta['title']} (new_id={new_id})")
+        else:
+            # 빈 페이지 생성
+            try:
+                placeholder = f'<p>페이지 내용 업데이트 대기 중... (원본 ID: {old_id})</p>'
+                new_id = create_page(meta['title'], placeholder, parent=parent_new_id)
+                page_map[str(old_id)] = new_id
+                pass1_count[0] += 1
+                logger.info(f"Pass1 생성: {meta['title']} (old={old_id}, new={new_id})")
+            except Exception as e:
+                logger.error(f"Pass1 페이지 생성 실패 [{meta['title']}]: {e}")
+                failed_uploads.append({'id': old_id, 'title': meta['title'], 'error': str(e), 'pass': 1})
+                return
+
+        # 자식 페이지 재귀 생성
+        for child_id in pages_info[old_id]['children']:
+            if child_id in page_ids_to_import:
+                create_page_structure(child_id, new_id)
+
+    # Pass 1 실행
+    if root_page_id:
+        if root_page_id in pages_info:
+            create_page_structure(root_page_id, parent_id)
+        else:
+            logger.error(f"루트 페이지를 찾을 수 없습니다: {root_page_id}")
+            return
+    else:
+        for page_id in page_ids_to_import:
+            info = pages_info[page_id]
+            parent = info['meta'].get('parent')
+            if not parent or parent not in page_ids_to_import:
+                create_page_structure(page_id, parent_id)
+
+    # Pass 1 완료 후 page_map 저장
+    resume_state['page_map'] = page_map
+    save_resume_state(resume_state)
+    logger.info(f"Pass 1 완료: {pass1_count[0]}개 페이지 생성")
+
+    # ========================================
+    # PASS 2: 내용 업데이트 + 링크 변환
+    # ========================================
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("PASS 2: 페이지 내용 업데이트 중...")
+    logger.info("=" * 60)
+
+    pass2_count = [0]
+
+    def update_page_content(old_id):
+        """Pass 2: 페이지 내용 업데이트 (첨부파일 + HTML)"""
+        if old_id not in pages_info:
+            return
+
+        info = pages_info[old_id]
+        meta = info['meta']
+        folder = info['folder']
+
+        new_id = page_map.get(str(old_id))
+        if not new_id:
+            logger.error(f"Pass2: page_map에 없음 (skip): {meta['title']}")
+            return
+
+        # 첨부파일 업로드
+        try:
+            upload_attachments(new_id, folder)
+        except Exception as e:
+            logger.error(f"Pass2 첨부파일 업로드 실패 [{meta['title']}]: {e}")
+
+        # HTML 본문 준비
+        page_storage_path = os.path.join(folder, 'page.storage.html')
+        att_dir = os.path.join(folder, 'attachments')
+        html_body = None
+
+        if os.path.exists(page_storage_path):
+            try:
+                with open(page_storage_path, 'r', encoding='utf-8') as f:
+                    html_body = f.read()
+
+                # Sanitizer 적용
+                try:
+                    html_body = Sanitizer.remove_macro_attrs(html_body)
+                    html_body = Sanitizer.sanitize_code_macros(html_body)
+                    html_body = Sanitizer.sanitize_gliffy_macros(html_body, att_dir)
+                    html_body = Sanitizer.convert_remaining_url_images(html_body, att_dir)
+
+                    # ✨ 내부 링크 변환 (page_map 완성되었으므로 가능!)
+                    html_body = convert_internal_links_with_pageid(
+                        html_body,
+                        OLD_BASE,
+                        NEW_BASE,
+                        page_map,
+                        pages_info=pages_info,
+                        current_page_old_id=old_id
+                    )
+
+                except Exception as e:
+                    logger.debug(f"Pass2 sanitizer 실패 [{meta['title']}]: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+            except Exception as e:
+                logger.warning(f"Pass2 HTML 읽기 실패 [{meta['title']}]: {e}")
+                html_body = None
+
+        if not html_body:
+            html_body = '<p>내용 없음</p>'
+
+        # data-uri 및 로컬 이미지 치환
+        html_body = convert_data_uri_imgs_to_acimage(html_body, att_dir)
+        html_body = convert_local_imgs_to_acimage(html_body)
+
+        # 페이지 업데이트
+        try:
+            parent_new_id = None
+            if meta.get('parent') and str(meta['parent']) in page_map:
+                parent_new_id = page_map[str(meta['parent'])]
+            elif not meta.get('parent') and parent_id:
+                parent_new_id = parent_id
+
+            update_page(new_id, meta['title'], html_body, parent=parent_new_id)
+            pass2_count[0] += 1
+            logger.info(f"✓ Pass2 완료: {meta['title']} (new_id={new_id})")
+
+            if old_id not in resume_state.get('uploaded', []):
+                resume_state.setdefault('uploaded', []).append(old_id)
+            save_resume_state(resume_state)
+
+        except Exception as e:
+            logger.error(f"Pass2 업데이트 실패 [{meta['title']}]: {e}")
+            failed_uploads.append({'id': old_id, 'title': meta['title'], 'error': str(e), 'pass': 2})
+
+        # 자식 페이지 재귀 업데이트
+        for child_id in pages_info[old_id]['children']:
+            if child_id in page_ids_to_import:
+                update_page_content(child_id)
+
+    # Pass 2 실행
+    if root_page_id:
+        if root_page_id in pages_info:
+            update_page_content(root_page_id)
+    else:
+        for page_id in page_ids_to_import:
+            info = pages_info[page_id]
+            parent = info['meta'].get('parent')
+            if not parent or parent not in page_ids_to_import:
+                update_page_content(page_id)
+
+    logger.info(f"Pass 2 완료: {pass2_count[0]}개 페이지 업데이트")
+
+    # 실패 기록 저장
+    if failed_uploads:
+        with open(os.path.join(EXPORT_DIR, 'failed_uploads.json'), 'w', encoding='utf-8') as f:
+            json.dump(failed_uploads, f, ensure_ascii=False, indent=2)
+        logger.warning(f"실패한 업로드 {len(failed_uploads)}개")
+
+    logger.info(f'2-Pass Import 완료: Pass1={pass1_count[0]}, Pass2={pass2_count[0]}')
+
+def import_all_two_pass(inline_images=False, force_update=False, root_page_id=None, target_parent_id=None):
+    """
+    2-Pass Import: 1차로 모든 페이지 생성, 2차로 내용 + 링크 업데이트
+
+    Args:
+        inline_images: 이미지를 인라인으로 변환할지 여부
+        force_update: 이미 업로드된 페이지도 다시 업로드할지 여부
+        root_page_id: import할 루트 페이지 ID
+        target_parent_id: 새 wiki에서 부모로 지정할 페이지 ID
+    """
+    from .utils import convert_internal_links_with_pageid
+
+    resume_state = load_resume_state()
+    page_map = resume_state.get('page_map', {})
+    pages_dir = os.path.join(EXPORT_DIR, 'pages')
+
+    if not os.path.exists(pages_dir):
+        logger.error(f"pages 디렉토리가 없습니다: {pages_dir}")
+        return
+
+    # 페이지 계층 구조 파악
+    logger.info("페이지 계층 구조 분석 중...")
+    pages_info = build_page_hierarchy(pages_dir)
+
+    # import할 페이지 목록 결정
+    if root_page_id:
+        logger.info(f"루트 페이지 {root_page_id}와 하위 페이지들을 import합니다.")
+        page_ids_to_import = get_descendant_page_ids(pages_info, root_page_id)
+        logger.info(f"총 {len(page_ids_to_import)}개 페이지를 import합니다.")
+    else:
+        logger.info("모든 페이지를 import합니다.")
+        page_ids_to_import = list(pages_info.keys())
+
+    # 부모 페이지 ID 결정
+    parent_id = target_parent_id or NEW_PARENT_PAGE_ID
+
+    failed_uploads = []
+
+    # ========================================
+    # PASS 1: 페이지 구조 생성 (빈 페이지)
+    # ========================================
+    logger.info("=" * 60)
+    logger.info("PASS 1: 페이지 구조 생성 중...")
+    logger.info("=" * 60)
+
+    pass1_count = [0]
+
+    def create_page_structure(old_id, parent_new_id):
+        """Pass 1: 페이지 구조만 생성 (내용은 placeholder)"""
+        if old_id not in pages_info:
+            return
+
+        info = pages_info[old_id]
+        meta = info['meta']
+
+        # 이미 생성된 경우 skip
+        if str(old_id) in page_map and not force_update:
+            new_id = page_map[str(old_id)]
+            logger.debug(f"Pass1 skip (이미 생성됨): {meta['title']} (new_id={new_id})")
+        else:
+            # 빈 페이지 생성
+            try:
+                placeholder = f'<p>페이지 내용 업데이트 대기 중... (원본 ID: {old_id})</p>'
+                new_id = create_page(meta['title'], placeholder, parent=parent_new_id)
+                page_map[str(old_id)] = new_id
+                pass1_count[0] += 1
+                logger.info(f"Pass1 생성: {meta['title']} (old={old_id}, new={new_id})")
+            except Exception as e:
+                logger.error(f"Pass1 페이지 생성 실패 [{meta['title']}]: {e}")
+                failed_uploads.append({'id': old_id, 'title': meta['title'], 'error': str(e), 'pass': 1})
+                return
+
+        # 자식 페이지 재귀 생성
+        for child_id in pages_info[old_id]['children']:
+            if child_id in page_ids_to_import:
+                create_page_structure(child_id, new_id)
+
+    # Pass 1 실행
+    if root_page_id:
+        if root_page_id in pages_info:
+            create_page_structure(root_page_id, parent_id)
+        else:
+            logger.error(f"루트 페이지를 찾을 수 없습니다: {root_page_id}")
+            return
+    else:
+        for page_id in page_ids_to_import:
+            info = pages_info[page_id]
+            parent = info['meta'].get('parent')
+            if not parent or parent not in page_ids_to_import:
+                create_page_structure(page_id, parent_id)
+
+    # Pass 1 완료 후 page_map 저장
+    resume_state['page_map'] = page_map
+    save_resume_state(resume_state)
+    logger.info(f"Pass 1 완료: {pass1_count[0]}개 페이지 생성")
+
+    # ========================================
+    # PASS 2: 내용 업데이트 + 링크 변환
+    # ========================================
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("PASS 2: 페이지 내용 업데이트 중...")
+    logger.info("=" * 60)
+
+    pass2_count = [0]
+
+    def update_page_content(old_id):
+        """Pass 2: 페이지 내용 업데이트 (첨부파일 + HTML)"""
+        if old_id not in pages_info:
+            return
+
+        info = pages_info[old_id]
+        meta = info['meta']
+        folder = info['folder']
+
+        new_id = page_map.get(str(old_id))
+        if not new_id:
+            logger.error(f"Pass2: page_map에 없음 (skip): {meta['title']}")
+            return
+
+        # 첨부파일 업로드
+        try:
+            upload_attachments(new_id, folder)
+        except Exception as e:
+            logger.error(f"Pass2 첨부파일 업로드 실패 [{meta['title']}]: {e}")
+
+        # HTML 본문 준비
+        page_storage_path = os.path.join(folder, 'page.storage.html')
+        att_dir = os.path.join(folder, 'attachments')
+        html_body = None
+
+        if os.path.exists(page_storage_path):
+            try:
+                with open(page_storage_path, 'r', encoding='utf-8') as f:
+                    html_body = f.read()
+
+                # Sanitizer 적용
+                try:
+                    html_body = Sanitizer.remove_macro_attrs(html_body)
+                    html_body = Sanitizer.sanitize_code_macros(html_body)
+                    html_body = Sanitizer.sanitize_gliffy_macros(html_body, att_dir)
+                    html_body = Sanitizer.convert_remaining_url_images(html_body, att_dir)
+
+                    # ✨ 내부 링크 변환 (page_map 완성되었으므로 가능!)
+                    html_body = convert_internal_links_with_pageid(html_body, OLD_BASE, NEW_BASE, page_map)
+
+                except Exception as e:
+                    logger.debug(f"Pass2 sanitizer 실패 [{meta['title']}]: {e}")
+            except Exception as e:
+                logger.warning(f"Pass2 HTML 읽기 실패 [{meta['title']}]: {e}")
+                html_body = None
+
+        if not html_body:
+            html_body = '<p>내용 없음</p>'
+
+        # data-uri 및 로컬 이미지 치환
+        html_body = convert_data_uri_imgs_to_acimage(html_body, att_dir)
+        html_body = convert_local_imgs_to_acimage(html_body)
+
+        # 페이지 업데이트
+        try:
+            parent_new_id = None
+            if meta.get('parent') and str(meta['parent']) in page_map:
+                parent_new_id = page_map[str(meta['parent'])]
+            elif not meta.get('parent') and parent_id:
+                parent_new_id = parent_id
+
+            update_page(new_id, meta['title'], html_body, parent=parent_new_id)
+            pass2_count[0] += 1
+            logger.info(f"✓ Pass2 완료: {meta['title']} (new_id={new_id})")
+
+            if old_id not in resume_state.get('uploaded', []):
+                resume_state.setdefault('uploaded', []).append(old_id)
+            save_resume_state(resume_state)
+
+        except Exception as e:
+            logger.error(f"Pass2 업데이트 실패 [{meta['title']}]: {e}")
+            failed_uploads.append({'id': old_id, 'title': meta['title'], 'error': str(e), 'pass': 2})
+
+        # 자식 페이지 재귀 업데이트
+        for child_id in pages_info[old_id]['children']:
+            if child_id in page_ids_to_import:
+                update_page_content(child_id)
+
+    # Pass 2 실행
+    if root_page_id:
+        if root_page_id in pages_info:
+            update_page_content(root_page_id)
+    else:
+        for page_id in page_ids_to_import:
+            info = pages_info[page_id]
+            parent = info['meta'].get('parent')
+            if not parent or parent not in page_ids_to_import:
+                update_page_content(page_id)
+
+    logger.info(f"Pass 2 완료: {pass2_count[0]}개 페이지 업데이트")
+
+    # 실패 기록 저장
+    if failed_uploads:
+        with open(os.path.join(EXPORT_DIR, 'failed_uploads.json'), 'w', encoding='utf-8') as f:
+            json.dump(failed_uploads, f, ensure_ascii=False, indent=2)
+        logger.warning(f"실패한 업로드 {len(failed_uploads)}개")
+
+    logger.info(f'2-Pass Import 완료: Pass1={pass1_count[0]}, Pass2={pass2_count[0]}')
