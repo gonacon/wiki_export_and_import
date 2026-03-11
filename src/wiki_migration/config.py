@@ -6,7 +6,7 @@ import requests
 # 기본 설정
 OLD_BASE = os.getenv("OLD_BASE", "https://wiki.11stcorp.com")
 NEW_BASE = os.getenv("NEW_BASE", "https://wiki.skplanet.com")
-# NEW_PARENT_PAGE_ID = os.getenv("NEW_PARENT_PAGE_ID", "728909587")
+# 사용자 pageId "728909587"
 NEW_PARENT_PAGE_ID = os.getenv("NEW_PARENT_PAGE_ID", "")
 
 OLD_USER = os.getenv("O_USER")
@@ -52,5 +52,6 @@ def setup_logger():
         logger.addHandler(fh)
     return logger
 
+# 초기화
 logger = setup_logger()
 

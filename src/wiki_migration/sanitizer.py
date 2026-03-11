@@ -1,9 +1,14 @@
 import re
 import html
 import os
+import logging
+from urllib.parse import unquote, urlparse
+
+logger = logging.getLogger("wiki_migrate")
 
 class Sanitizer:
     """페이지 storage HTML을 타깃 Confluence(예: 7.19)에 맞게 전처리합니다."""
+
     @staticmethod
     def remove_macro_attrs(html_text):
         out = re.sub(r'\s+ac:schema-version="[^"]+"', "", html_text, flags=re.IGNORECASE)
@@ -18,7 +23,7 @@ class Sanitizer:
             r'<ac:plain-text-body>\s*<!\[CDATA\[(.*?)\]\]>\s*</ac:plain-text-body>'
             r'.*?</ac:structured-macro>',
             re.DOTALL | re.IGNORECASE,
-        )
+            )
         LANG_RE = re.compile(r'<ac:parameter\s+ac:name="language"\s*>(.*?)</ac:parameter>', re.DOTALL | re.IGNORECASE)
 
         def _repl_full(m):
@@ -44,7 +49,7 @@ class Sanitizer:
         return CODE_ANY_RE.sub(_repl_any, html_text)
 
     @staticmethod
-    def sanitize_gliffy_macros(html_text, attachments_dir=None, logger=None):
+    def sanitize_gliffy_macros(html_text, attachments_dir=None):
         GLIFFY_RE = re.compile(r'<ac:structured-macro\b[^>]*ac:name="gliffy"[^>]*>.*?</ac:structured-macro>', re.DOTALL | re.IGNORECASE)
         PARAM_RE = re.compile(r'<ac:parameter\s+ac:name="([^"]+)"\s*>(.*?)</ac:parameter>', re.DOTALL | re.IGNORECASE)
 
@@ -99,3 +104,57 @@ class Sanitizer:
 
         return GLIFFY_RE.sub(_repl, html_text)
 
+    @staticmethod
+    def convert_remaining_url_images(html_text, attachments_dir=None):
+        """
+        Import 시점에 남아있는 <ri:url> 이미지를 <ri:attachment>로 변환
+        (Export에서 처리 못한 경우를 위한 보험)
+
+        Args:
+            html_text: HTML 내용
+            attachments_dir: 첨부파일 디렉토리 (파일 존재 여부 확인용)
+
+        Returns:
+            변환된 HTML
+        """
+        # <ri:url> 패턴
+        url_pattern = re.compile(
+            r'<ac:image[^>]*>.*?<ri:url\s+ri:value="([^"]+)"\s*/?>.*?</ac:image>',
+            re.DOTALL | re.IGNORECASE
+        )
+
+        def replace_with_attachment(match):
+            full_block = match.group(0)
+            url = match.group(1).replace('&amp;', '&')
+
+            # URL에서 파일명 추출
+            try:
+                parsed = urlparse(url)
+                filename = os.path.basename(unquote(parsed.path))
+                filename = filename.split('?')[0]
+
+                if not filename:
+                    logger.warning(f"파일명 추출 실패, 원본 유지: {url}")
+                    return full_block
+
+                # 첨부파일 존재 여부 확인
+                if attachments_dir and os.path.isdir(attachments_dir):
+                    file_path = os.path.join(attachments_dir, filename)
+                    if not os.path.exists(file_path):
+                        logger.warning(f"첨부파일 없음, 원본 유지: {filename}")
+                        return full_block
+
+                # ac:alt 추출
+                alt_match = re.search(r'ac:alt="([^"]*)"', full_block)
+                alt_text = alt_match.group(1) if alt_match else filename
+
+                # 변환
+                new_block = f'<ac:image ac:alt="{alt_text}"><ri:attachment ri:filename="{filename}" /></ac:image>'
+                logger.info(f"URL 이미지를 attachment로 변환: {filename}")
+                return new_block
+
+            except Exception as e:
+                logger.warning(f"URL 이미지 변환 실패: {url}, {e}")
+                return full_block
+
+        return url_pattern.sub(replace_with_attachment, html_text)

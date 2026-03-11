@@ -4,9 +4,9 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from .config import OLD_BASE, old_session, EXPORT_DIR, MAX_WORKERS, MAX_RETRIES, RETRY_DELAY
-from .utils import safe_folder_name, fix_image_links_html, md_convert, convert_images_to_inline
+from .utils import safe_folder_name, fix_image_links_html, md_convert, convert_images_to_inline, fix_url_images_in_html
 from .sanitizer import Sanitizer
-from .io_utils import save_page_files, download_attachments_for_page, load_resume_state, save_resume_state, ensure_export_pages_dir
+from .io_utils import save_page_files, download_attachments_for_page, load_resume_state, save_resume_state, ensure_export_pages_dir, download_gliffy_thumbnails, save_page_files_v2
 import logging
 
 logger = logging.getLogger("wiki_migrate")
@@ -42,15 +42,15 @@ def sort_pages_by_hierarchy(pages):
     return sorted_pages
 
 
-def get_all_pages(old_session, OLD_BASE, SPACE, root_page_id=None):
+def get_all_pages(old_session, old_base, space, root_page_id=None):
     if root_page_id:
-        return get_descendant_pages(old_session, OLD_BASE, root_page_id)
+        return get_descendant_pages(old_session, old_base, root_page_id)
     pages = []
     start = 0
     limit = 100
     while True:
-        url = f"{OLD_BASE}/rest/api/content"
-        params = {"spaceKey": SPACE, "limit": limit, "start": start, "expand": "body.storage,ancestors"}
+        url = f"{old_base}/rest/api/content"
+        params = {"spaceKey": space, "limit": limit, "start": start, "expand": "body.storage,ancestors"}
         r = old_session.get(url, params=params)
         data = r.json()
         results = data.get('results', [])
@@ -62,9 +62,9 @@ def get_all_pages(old_session, OLD_BASE, SPACE, root_page_id=None):
     return sort_pages_by_hierarchy(pages)
 
 
-def get_descendant_pages(old_session, OLD_BASE, root_page_id):
+def get_descendant_pages(old_session, old_base, root_page_id):
     pages = []
-    url = f"{OLD_BASE}/rest/api/content/{root_page_id}"
+    url = f"{old_base}/rest/api/content/{root_page_id}"
     r = old_session.get(url, params={"expand": "body.storage,ancestors"})
     root = r.json()
     pages.append(root)
@@ -72,7 +72,7 @@ def get_descendant_pages(old_session, OLD_BASE, root_page_id):
         start = 0
         limit = 100
         while True:
-            url = f"{OLD_BASE}/rest/api/content/{page_id}/child/page"
+            url = f"{old_base}/rest/api/content/{page_id}/child/page"
             params = {"limit": limit, "start": start, "expand": "body.storage,ancestors"}
             r = old_session.get(url, params=params)
             results = r.json().get('results', [])
@@ -93,27 +93,43 @@ def process_page(i, page, inline_images, resume_state, old_session=old_session):
         return page_id, True, None
     try:
         html = page['body']['storage']['value']
+
+        # 폴더 먼저 생성
+        title = page.get('title', 'untitled')
+        folder = os.path.join(EXPORT_DIR, "pages", f"{i:04d}_{safe_folder_name(title)}")
+        os.makedirs(os.path.join(folder, "attachments"), exist_ok=True)
+
+        # ✨ URL 이미지 다운로드 및 HTML 변환
+        html = fix_url_images_in_html(html, os.path.join(folder, "attachments"), old_session)
+
+        # 기존 로직
         html_local = fix_image_links_html(html, os.path.join(EXPORT_DIR, 'pages'))
-        markdown = md_convert(html_local, heading_style='ATX') if 'md_convert' in globals() else html_local
-        folder = save_page_files(page, i, html, markdown)
+        markdown = md_convert(html_local, heading_style='ATX')  # ← globals() 체크 제거
+
+        # 파일 저장
+        save_page_files_v2(page, folder, html, markdown)
+
+        # 일반 첨부파일 다운로드
         download_attachments_for_page(page, folder)
-        # Gliffy thumbnails handled elsewhere
+
+        # Inline images 처리
         if inline_images:
             md_path = os.path.join(folder, 'page.md')
             if os.path.exists(md_path):
                 md_text = open(md_path, 'r', encoding='utf-8').read()
                 md_text = convert_images_to_inline(md_text, os.path.join(folder, 'attachments'))
                 open(md_path, 'w', encoding='utf-8').write(md_text)
+
         return page_id, True, None
     except Exception as e:
         logger.error(f"페이지 처리 실패 [{page.get('title')}]: {e}")
         return page_id, False, str(e)
 
 
-def export_all(old_session, OLD_BASE, SPACE, root_page_id=None, inline_images=False):
+def export_all(old_session, old_base, space, root_page_id=None, inline_images=False):
     ensure_export_pages_dir()
     resume_state = load_resume_state()
-    pages = get_all_pages(old_session, OLD_BASE, SPACE, root_page_id=root_page_id)
+    pages = get_all_pages(old_session, old_base, space, root_page_id=root_page_id)
     logger.info(f"다운로드 대상 페이지: {len(pages)}개")
     tasks = [(i, page, inline_images, resume_state) for i, page in enumerate(pages)]
     from concurrent.futures import ThreadPoolExecutor

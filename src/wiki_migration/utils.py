@@ -3,9 +3,11 @@ import re
 import base64
 import html
 import markdown2
+import logging
 from markdownify import markdownify as md_convert
-from urllib.parse import unquote
+from urllib.parse import urlparse, unquote
 
+logger = logging.getLogger("wiki_migrate")
 
 def safe_folder_name(title):
     return re.sub(r'[<>:\"/\\|?*]', '_', title)
@@ -118,3 +120,133 @@ def convert_data_uri_imgs_to_acimage(html_text, attachments_dir):
 
     return img_tag_pattern.sub(repl, html_text)
 
+def extract_filename_from_url(url):
+    """URL에서 파일명 추출 (URL 디코딩 포함)"""
+    parsed = urlparse(url)
+    path = parsed.path
+
+    # URL 디코딩
+    decoded_path = unquote(path)
+
+    # 파일명 추출
+    filename = os.path.basename(decoded_path)
+
+    # 쿼리 파라미터 제거
+    filename = filename.split('?')[0]
+
+    return filename
+
+
+def download_url_image(url, save_dir, session, filename=None):
+    """
+    URL 이미지를 다운로드하여 저장
+
+    Args:
+        url: 이미지 URL
+        save_dir: 저장 디렉토리
+        session: requests.Session 객체
+        filename: 저장할 파일명 (None이면 URL에서 추출)
+
+    Returns:
+        저장된 파일명 또는 None (실패 시)
+    """
+    try:
+        if not filename:
+            filename = extract_filename_from_url(url)
+
+        # 파일명 안전하게 처리
+        filename = safe_folder_name(filename)
+
+        if not filename:
+            logger.warning(f"파일명 추출 실패: {url}")
+            return None
+
+        save_path = os.path.join(save_dir, filename)
+
+        # 이미 다운로드된 경우 skip
+        if os.path.exists(save_path):
+            logger.debug(f"이미지 이미 존재 (skip): {filename}")
+            return filename
+
+        # 다운로드
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+
+        # 저장
+        with open(save_path, 'wb') as f:
+            f.write(resp.content)
+
+        logger.debug(f"URL 이미지 다운로드 완료: {filename}")
+        return filename
+
+    except Exception as e:
+        logger.error(f"URL 이미지 다운로드 실패 [{url}]: {e}")
+        return None
+
+
+def fix_url_images_in_html(html_text, attachments_dir, session):
+    """
+    HTML에서 <ri:url> 이미지를 찾아서 다운로드하고 로컬 참조로 변경
+
+    Args:
+        html_text: 원본 HTML
+        attachments_dir: 첨부파일 저장 디렉토리
+        session: requests.Session (다운로드용)
+
+    Returns:
+        변경된 HTML
+    """
+    import re
+
+    # <ri:url ri:value="..."/> 패턴 찾기
+    url_pattern = re.compile(
+        r'<ri:url\s+ri:value="([^"]+)"\s*/?>',
+        re.IGNORECASE
+    )
+
+    # <ac:image>...</ac:image> 블록 전체 찾기
+    image_block_pattern = re.compile(
+        r'<ac:image[^>]*>.*?<ri:url\s+ri:value="([^"]+)"\s*/?>.*?</ac:image>',
+        re.DOTALL | re.IGNORECASE
+    )
+
+    downloaded_files = {}  # URL -> filename 매핑
+
+    def download_and_convert(match):
+        """이미지 블록을 변환"""
+        full_block = match.group(0)
+        url = match.group(1)
+
+        # URL 디코딩 (HTML 엔티티)
+        url = url.replace('&amp;', '&')
+
+        # 이미 다운로드한 경우
+        if url in downloaded_files:
+            filename = downloaded_files[url]
+        else:
+            # 다운로드
+            filename = download_url_image(url, attachments_dir, session)
+            if filename:
+                downloaded_files[url] = filename
+            else:
+                # 다운로드 실패 시 원본 유지
+                return full_block
+
+        # <ri:url>을 <ri:attachment>로 변경
+        # ac:alt 속성 추출
+        alt_match = re.search(r'ac:alt="([^"]*)"', full_block)
+        alt_text = alt_match.group(1) if alt_match else filename
+
+        # 새로운 이미지 블록 생성
+        new_block = f'<ac:image ac:alt="{alt_text}"><ri:attachment ri:filename="{filename}" /></ac:image>'
+
+        logger.info(f"URL 이미지 변환: {url} → {filename}")
+        return new_block
+
+    # 변환 실행
+    converted_html = image_block_pattern.sub(download_and_convert, html_text)
+
+    if downloaded_files:
+        logger.info(f"총 {len(downloaded_files)}개 URL 이미지 다운로드 완료")
+
+    return converted_html
