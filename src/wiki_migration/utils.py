@@ -12,7 +12,7 @@ def safe_folder_name(title):
 
 
 def fix_image_links_html(html_text, attachments_dir):
-    pattern = re.compile(r'<ac:image[^>]*>.*?<ri:attachment\s+ri:filename="([^\"]+)"[^/]*/?>.*?</ac:image>', re.DOTALL | re.IGNORECASE)
+    pattern = re.compile(r'<ac:image[^>]*>.*?<ri:attachment\s+ri:filename="([^"]+)"[^/]*/?>.*?</ac:image>', re.DOTALL | re.IGNORECASE)
     def repl(m):
         fname = m.group(1)
         return f'<img src="./attachments/{fname}" alt="{fname}" />'
@@ -117,3 +117,4 @@ def convert_data_uri_imgs_to_acimage(html_text, attachments_dir):
         return to_acimage(filename)
 
     return img_tag_pattern.sub(repl, html_text)
+

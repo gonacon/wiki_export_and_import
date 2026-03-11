@@ -1,9 +1,10 @@
 import os
 import time
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from .config import OLD_BASE, old_session, EXPORT_DIR, MAX_WORKERS, MAX_RETRIES, RETRY_DELAY
-from .utils import safe_folder_name, fix_image_links_html
+from .utils import safe_folder_name, fix_image_links_html, md_convert, convert_images_to_inline
 from .sanitizer import Sanitizer
 from .io_utils import save_page_files, download_attachments_for_page, load_resume_state, save_resume_state, ensure_export_pages_dir
 import logging
@@ -132,4 +133,3 @@ def export_all(old_session, OLD_BASE, SPACE, root_page_id=None, inline_images=Fa
             json.dump(failed, f, ensure_ascii=False, indent=2)
         logger.warning(f"실패한 페이지 {len(failed)}개")
     logger.info('Export 완료')
-

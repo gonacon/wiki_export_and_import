@@ -4,7 +4,7 @@ import logging
 from .config import NEW_BASE, NEW_SPACE, NEW_PARENT_PAGE_ID, new_session, EXPORT_DIR
 from .sanitizer import Sanitizer
 from .io_utils import load_resume_state, save_resume_state
-from .utils import markdown_to_confluence_html, convert_local_imgs_to_acimage, convert_data_uri_imgs_to_acimage
+from .utils import markdown_to_confluence_html, convert_local_imgs_to_acimage, convert_data_uri_imgs_to_acimage, convert_images_to_inline
 
 logger = logging.getLogger('wiki_migrate')
 
@@ -169,4 +169,3 @@ def import_all(inline_images=False, force_update=False):
             json.dump(failed_uploads, f, ensure_ascii=False, indent=2)
         logger.warning(f"실패한 업로드 {len(failed_uploads)}개 → {os.path.join(EXPORT_DIR, 'failed_uploads.json')}")
     logger.info('Import 완료')
-
