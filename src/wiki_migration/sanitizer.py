@@ -3,6 +3,7 @@ import html
 import os
 import logging
 import unicodedata
+from collections import Counter
 from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger("wiki_migrate")
@@ -17,11 +18,59 @@ class Sanitizer:
         return out
 
     @staticmethod
+    def repair_broken_confluence_links(html_text):
+        """깨진 ac:link / ac:link-body 닫는 태그를 제거하고 필요한 닫힘은 보완합니다."""
+        token_re = re.compile(
+            r'<(?P<closing>/)?(?P<tag>ac:link-body|ac:link)\b(?P<attrs>[^>]*)?(?P<selfclose>/)?>',
+            re.IGNORECASE,
+        )
+        tracked_tags = {"ac:link", "ac:link-body"}
+        open_counts = Counter()
+        out = []
+        last_idx = 0
+
+        for match in token_re.finditer(html_text):
+            out.append(html_text[last_idx:match.start()])
+            token = match.group(0)
+            tag = match.group('tag').lower()
+            is_closing = bool(match.group('closing'))
+            is_self_closing = bool(match.group('selfclose')) and not is_closing
+
+            if is_self_closing or tag not in tracked_tags:
+                out.append(token)
+            elif not is_closing:
+                open_counts[tag] += 1
+                out.append(token)
+            else:
+                if open_counts[tag] > 0:
+                    open_counts[tag] -= 1
+                    out.append(token)
+                else:
+                    logger.warning(f"orphan closing tag 제거: </{tag}>")
+
+            last_idx = match.end()
+
+        out.append(html_text[last_idx:])
+
+        repaired = ''.join(out)
+
+        if open_counts['ac:link-body'] > 0 or open_counts['ac:link'] > 0:
+            logger.warning(
+                "열린 Confluence 링크 태그 자동 종료: ac:link-body=%s, ac:link=%s",
+                open_counts['ac:link-body'],
+                open_counts['ac:link'],
+            )
+
+        repaired += '</ac:link-body>' * open_counts['ac:link-body']
+        repaired += '</ac:link>' * open_counts['ac:link']
+        return repaired
+
+    @staticmethod
     def sanitize_code_macros(html_text):
         CODE_FULL_RE = re.compile(
             r'<ac:structured-macro\b[^>]*ac:name="code"[^>]*>'
             r'.*?'
-            r'<ac:plain-text-body>\s*<!\[CDATA\[(.*?)\]\]>\s*</ac:plain-text-body>'
+            r'<ac:plain-text-body>\s*<!\[CDATA\[(.*?)]]>\s*</ac:plain-text-body>'
             r'.*?</ac:structured-macro>',
             re.DOTALL | re.IGNORECASE,
             )
@@ -41,7 +90,7 @@ class Sanitizer:
 
         def _repl_any(m):
             body = m.group(1)
-            cdata = re.search(r'<!\[CDATA\[(.*?)\]\]>', body, re.DOTALL)
+            cdata = re.search(r'<!\[CDATA\[(.*?)]]>', body, re.DOTALL)
             code_text = cdata.group(1) if cdata else re.sub(r'<[^>]+>', '', body).strip()
             lang_m = LANG_RE.search(m.group(0))
             lang = (lang_m.group(1).strip().lower() if lang_m else "") or "text"

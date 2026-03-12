@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+from typing import cast
 from .config import NEW_BASE, NEW_SPACE, NEW_PARENT_PAGE_ID, new_session, EXPORT_DIR
 from .sanitizer import Sanitizer
 from .io_utils import load_resume_state, save_resume_state
@@ -77,8 +78,10 @@ def upload_attachments(page_id, folder):
 def build_page_hierarchy(pages_dir):
     """Export된 페이지들의 계층 구조를 파악"""
     pages_info = {}
+    pages_dir = cast(str, pages_dir)
 
     for folder_name in os.listdir(pages_dir):
+        folder_name = cast(str, folder_name)
         folder = os.path.join(pages_dir, folder_name)
         meta_path = os.path.join(folder, 'meta.json')
         if not os.path.exists(meta_path):
@@ -178,6 +181,7 @@ def upload_page(old_id, pages_info, page_map, parent_new_id, inline_images, forc
             with open(page_storage_path, 'r', encoding='utf-8') as f:
                 html_body = f.read()
             try:
+                html_body = Sanitizer.repair_broken_confluence_links(html_body)
                 html_body = Sanitizer.remove_macro_attrs(html_body)
                 html_body = Sanitizer.sanitize_code_macros(html_body)
                 html_body = Sanitizer.sanitize_gliffy_macros(html_body, att_dir)
@@ -198,6 +202,7 @@ def upload_page(old_id, pages_info, page_map, parent_new_id, inline_images, forc
             try:
                 html_body = markdown_to_confluence_html(md_text)
                 try:
+                    html_body = Sanitizer.repair_broken_confluence_links(html_body)
                     html_body = Sanitizer.remove_macro_attrs(html_body)
                     html_body = Sanitizer.sanitize_code_macros(html_body)
                     html_body = Sanitizer.sanitize_gliffy_macros(html_body, att_dir)
@@ -503,6 +508,7 @@ def import_all_two_pass(inline_images=False, force_update=False, root_page_id=No
 
                 # Sanitizer 적용
                 try:
+                    html_body = Sanitizer.repair_broken_confluence_links(html_body)
                     html_body = Sanitizer.remove_macro_attrs(html_body)
                     html_body = Sanitizer.sanitize_code_macros(html_body)
                     html_body = Sanitizer.sanitize_gliffy_macros(html_body, att_dir)
