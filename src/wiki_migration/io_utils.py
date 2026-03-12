@@ -34,15 +34,16 @@ def save_page_files(page, index, html, markdown):
         json.dump(meta, f, ensure_ascii=False, indent=2)
     return folder
 
-def save_page_files_v2(page, folder, html, markdown):
+def save_page_files_v2(page, folder, html, markdown, converted_html=None):
     """
     페이지 파일 저장 (폴더가 이미 생성된 경우)
 
     Args:
         page: 페이지 정보
         folder: 이미 생성된 폴더 경로
-        html: HTML 내용
+        html: 원본 storage HTML 내용
         markdown: Markdown 내용
+        converted_html: export 중 변환된 storage HTML (optional)
     """
     title = page.get('title', 'untitled')
 
@@ -51,6 +52,13 @@ def save_page_files_v2(page, folder, html, markdown):
             f.write(html)
     except Exception as e:
         logger.warning(f"page.storage.html 저장 실패 [{title}]: {e}")
+
+    if converted_html is not None:
+        try:
+            with open(os.path.join(folder, "page.storage.converted.html"), "w", encoding="utf-8") as f:
+                f.write(converted_html)
+        except Exception as e:
+            logger.warning(f"page.storage.converted.html 저장 실패 [{title}]: {e}")
 
     with open(os.path.join(folder, "page.md"), "w", encoding="utf-8") as f:
         f.write(markdown)

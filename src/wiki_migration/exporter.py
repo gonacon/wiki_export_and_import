@@ -112,8 +112,8 @@ def process_page(i, page, inline_images, resume_state, old_session=old_session):
         # body.storage.value 안전 추출
         body = page.get('body', {})
         storage = body.get('storage', {}) if isinstance(body, dict) else None
-        html = storage.get('value') if isinstance(storage, dict) else None
-        if html is None:
+        raw_html = storage.get('value') if isinstance(storage, dict) else None
+        if raw_html is None:
             raise KeyError("page body.storage.value missing")
     except Exception as e:
         # page_id가 없을 수 있으므로 안전하게 처리
@@ -127,14 +127,14 @@ def process_page(i, page, inline_images, resume_state, old_session=old_session):
         os.makedirs(os.path.join(folder, "attachments"), exist_ok=True)
 
         # ✨ URL 이미지 다운로드 및 HTML 변환
-        html = fix_url_images_in_html(html, os.path.join(folder, "attachments"), old_session)
+        converted_html = fix_url_images_in_html(raw_html, os.path.join(folder, "attachments"), old_session)
 
         # 기존 로직
-        html_local = fix_image_links_html(html, os.path.join(EXPORT_DIR, 'pages'))
+        html_local = fix_image_links_html(converted_html, os.path.join(EXPORT_DIR, 'pages'))
         markdown = md_convert(html_local, heading_style='ATX')  # ← globals() 체크 제거
 
-        # 파일 저장
-        save_page_files_v2(page, folder, html, markdown)
+        # 파일 저장: page.storage.html=원본, 변환본은 별도 파일
+        save_page_files_v2(page, folder, raw_html, markdown, converted_html)
 
         # 일반 첨부파일 다운로드
         download_attachments_for_page(page, folder)
