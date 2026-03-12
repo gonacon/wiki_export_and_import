@@ -2,6 +2,7 @@ import re
 import html
 import os
 import logging
+import unicodedata
 from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger("wiki_migrate")
@@ -56,43 +57,90 @@ class Sanitizer:
         def _extract(macro_html):
             return {m.group(1).strip(): m.group(2).strip() for m in PARAM_RE.finditer(macro_html)}
 
-        def _safe(s, maxlen=80):
-            return re.sub(r'[^\w\-.]', '_', s)[:maxlen]
+        def _find_matching_image(attachments_dir, display_name, macro_id):
+            """
+            디스플레이명이나 매크로ID와 일치하는 이미지 파일을 찾습니다.
+            우선순위:
+            1. displayName + 이미지 확장자 (정확 일치)
+            2. displayName과 정확히 일치하는 이미지 파일
+            3. macroId와 일치하는 이미지
+            4. 부분 문자열 매칭
+            """
+            if not attachments_dir or not os.path.isdir(attachments_dir):
+                return None
+                
+            files = os.listdir(attachments_dir)
+            image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'}
+            
+            # 이미지 파일만 필터링
+            image_files = [fn for fn in files if any(fn.lower().endswith(ext) for ext in image_exts)]
+            
+            # 정규화된 파일명 매핑 (NFC 형식으로 정규화)
+            # macOS 파일 시스템은 NFD 형식을 사용하므로, 비교를 위해 NFC로 정규화
+            normalized_map = {}
+            for fn in image_files:
+                fn_nfc = unicodedata.normalize('NFC', fn)
+                fn_nfc_lower = fn_nfc.lower()
+                normalized_map[fn_nfc_lower] = fn
+            
+            # 검색 문자열 정규화 함수
+            def normalize_for_search(s):
+                return unicodedata.normalize('NFC', s).lower()
+            
+            # 1. displayName + 이미지 확장자로 일치 (우선순위 높음)
+            if display_name:
+                display_normalized = normalize_for_search(display_name)
+                for ext in image_exts:
+                    key = display_normalized + ext
+                    if key in normalized_map:
+                        return normalized_map[key]
+            
+            # 2. displayName이 정확히 일치하는 이미지 파일
+            if display_name:
+                display_normalized = normalize_for_search(display_name)
+                if display_normalized in normalized_map:
+                    return normalized_map[display_normalized]
+            
+            # 3. macroId와 일치
+            if macro_id:
+                macro_normalized = normalize_for_search(macro_id)
+                if macro_normalized in normalized_map:
+                    return normalized_map[macro_normalized]
+            
+            # 4. displayName을 포함하는 파일 찾기 (부분 매칭)
+            if display_name:
+                display_normalized = normalize_for_search(display_name)
+                for fn in image_files:
+                    fn_normalized = normalize_for_search(fn)
+                    if display_normalized in fn_normalized:
+                        return fn
+            
+            # 5. macroId를 포함하는 파일 찾기
+            if macro_id:
+                macro_normalized = normalize_for_search(macro_id)
+                for fn in image_files:
+                    fn_normalized = normalize_for_search(fn)
+                    if macro_normalized in fn_normalized:
+                        return fn
+            
+            return None
 
         def _repl(m):
             params = _extract(m.group(0))
             display = (params.get('displayName') or params.get('name') or params.get('macroId') or 'Gliffy diagram')
             mid = params.get('macroId', '')
+            
+            # displayName 우선, 없으면 name
+            display_name = params.get('displayName') or params.get('name') or ''
 
-            candidates = []
             if attachments_dir and os.path.isdir(attachments_dir):
-                files = os.listdir(attachments_dir)
-                lower_map = {fn.lower(): fn for fn in files}
+                matched_file = _find_matching_image(attachments_dir, display_name, mid)
+                
+                if matched_file:
+                    logger.info(f"Gliffy 매크로 → 이미지 변환: {display} → {matched_file}")
+                    return f'<ac:image><ri:attachment ri:filename="{html.escape(matched_file)}" /></ac:image>'
 
-                for key in [f"gliffy_{_safe(display)}.png", f"gliffy_{_safe(mid)}.png" if mid else None]:
-                    if key and key.lower() in lower_map:
-                        candidates.append(lower_map[key.lower()])
-
-                if mid and mid.lower() in lower_map:
-                    candidates.append(lower_map[mid.lower()])
-
-                dn = params.get('displayName', '')
-                for variant in [dn, dn + '.png', dn + '.svg', dn + '.gliffy']:
-                    if variant and variant.lower() in lower_map:
-                        candidates.append(lower_map[variant.lower()])
-
-                for fn in files:
-                    if 'gliffy' in fn.lower() or (mid and mid.lower() in fn.lower()):
-                        candidates.append(fn)
-
-                for ext in ('.png', '.svg', '.jpg', '.jpeg'):
-                    for c in candidates:
-                        if c.lower().endswith(ext):
-                            return f'<ac:image><ri:attachment ri:filename="{html.escape(c)}" /></ac:image>'
-
-                if candidates:
-                    return f'<a href="./attachments/{html.escape(candidates[0])}">{html.escape(display)} (diagram)</a>'
-
+            logger.warning(f"Gliffy 매크로 변환 실패 (첨부파일 없음): {display}")
             return (
                 f'<div class="gliffy-macro-fallback" '
                 f'style="border:1px dashed #f0a;padding:8px;background:#fff7e6;'
