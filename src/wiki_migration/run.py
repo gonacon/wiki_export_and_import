@@ -3,17 +3,17 @@
 """
 Interactive CLI wrapper for Confluence Wiki Migration Tool
 """
+import os
 
 from .config import (
     OLD_BASE, NEW_BASE, OLD_USER, OLD_PASS, NEW_USER, NEW_PASS,
-    SPACE, NEW_SPACE, EXPORT_DIR, NEW_PARENT_PAGE_ID, logger
+    SPACE, NEW_SPACE, MAX_WORKERS, NEW_PARENT_PAGE_ID, logger, login
 )
 from .exporter import export_all
 from .importer import import_all, import_all_two_pass
 from .config import old_session, new_session
 import argparse
 import sys
-
 
 def get_user_input(prompt, default=None, required=False):
     """사용자 입력을 받는 헬퍼 함수"""
@@ -43,6 +43,8 @@ def get_yes_no(prompt, default=False):
         return default
     return user_input in ['y', 'yes', '예']
 
+
+# run.py - interactive_mode() 함수 전체 교체
 
 def interactive_mode():
     """대화형 모드로 실행"""
@@ -75,7 +77,7 @@ def interactive_mode():
     print(f"\n선택된 모드: {mode}")
     print()
 
-    # 2. 페이지 ID 설정
+    # 2. Export 설정
     if mode in ['export', 'migrate']:
         print("Export 설정")
         print("-" * 60)
@@ -96,10 +98,47 @@ def interactive_mode():
             print(f"→ 페이지 {root_page_id}와 하위 페이지를 export 합니다.")
 
         inline_images_export = get_yes_no("이미지를 base64 인라인으로 변환하시겠습니까?", default=False)
+
+        # ✨ 워커 수 입력 추가
+        # ✨ CPU 코어 수 자동 감지
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        recommended_workers = min(cpu_count, 16)  # 최대 16개 권장
+
+        print()
+        print(f"시스템 CPU 코어 수: {cpu_count}")
+        print(f"권장 워커 수: {recommended_workers} (현재 기본값: {MAX_WORKERS})")
+        custom_workers = get_yes_no("워커 수를 직접 입력하시겠습니까?", default=False)
+
+
+        if custom_workers:
+            while True:
+                workers_input = get_user_input(
+                    f"워커 수를 입력하세요 (1-32, 권장: {recommended_workers})",
+                    default=str(recommended_workers)  # 권장값을 기본값으로
+                )
+                try:
+                    export_workers = int(workers_input)
+                    if export_workers < 1:
+                        print("워커 수는 1 이상이어야 합니다.")
+                        continue
+                    if export_workers > cpu_count * 2:
+                        print(f"⚠️  경고: 워커 수({export_workers})가 CPU 코어 수({cpu_count})의 2배를 초과합니다.")
+                        if not get_yes_no("계속 진행하시겠습니까?", default=False):
+                            continue
+                    print(f"→ 워커 수: {export_workers}")
+                    break
+                except ValueError:
+                    print("유효한 숫자를 입력해주세요.")
+        else:
+            export_workers = recommended_workers  # 기본값 대신 권장값 사용
+            print(f"→ 워커 수: {export_workers} (권장값)")
+
         print()
     else:
         root_page_id = None
         inline_images_export = False
+        export_workers = MAX_WORKERS
 
     # 3. Import 설정
     if mode in ['import', 'migrate']:
@@ -142,9 +181,8 @@ def interactive_mode():
 
         inline_images_import = get_yes_no("이미지를 base64 인라인으로 변환하시겠습니까?", default=False)
         force_update = get_yes_no("이미 업로드된 페이지도 다시 업로드하시겠습니까?", default=False)
-        print()
 
-        # ✨ 2-Pass 옵션 추가
+        # 2-Pass 옵션
         use_two_pass = get_yes_no("2-Pass Import를 사용하시겠습니까? (내부 링크 변환 개선)", default=True)
         print()
     else:
@@ -152,6 +190,7 @@ def interactive_mode():
         target_parent_id = None
         inline_images_import = False
         force_update = False
+        use_two_pass = False
 
     # 4. 확인 및 실행
     print("=" * 60)
@@ -162,12 +201,14 @@ def interactive_mode():
     if mode in ['export', 'migrate']:
         print(f"Export - 루트 페이지: {root_page_id if root_page_id else '전체'}")
         print(f"Export - 인라인 이미지: {inline_images_export}")
+        print(f"Export - 워커 수: {export_workers}")  # ✨ 추가
 
     if mode in ['import', 'migrate']:
         print(f"Import - 루트 페이지: {import_root_page_id if import_root_page_id else '전체'}")
         print(f"Import - 부모 페이지: {target_parent_id if target_parent_id else '스페이스 루트'}")
         print(f"Import - 인라인 이미지: {inline_images_import}")
         print(f"Import - 강제 업데이트: {force_update}")
+        print(f"Import - 2-Pass: {use_two_pass}")  # ✨ 추가
 
     print("=" * 60)
     print()
@@ -183,13 +224,28 @@ def interactive_mode():
     # 5. 실행
     try:
         if mode == 'export':
+            # 로그인 후 export 실행
+            try:
+                login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
+            except Exception as e:
+                logger.error(f"로그인 실패로 export 중단: {e}")
+                print(f"로그인 실패: {e}")
+                return
             export_all(old_session, OLD_BASE, SPACE,
                        root_page_id=root_page_id,
-                       inline_images=inline_images_export)
+                       inline_images=inline_images_export,
+                       workers=export_workers)  # ✨ 추가
 
         elif mode == 'import':
+            # 로그인 후 import 실행
+            try:
+                login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+            except Exception as e:
+                logger.error(f"로그인 실패로 import 중단: {e}")
+                print(f"로그인 실패: {e}")
+                return
             if use_two_pass:
-                logger.info("2-Pass Import 모드로 실행합니다.")
+                logger.info("🚀 2-Pass Import 모드로 실행합니다.")
                 import_all_two_pass(
                     inline_images=inline_images_import,
                     force_update=force_update,
@@ -197,6 +253,7 @@ def interactive_mode():
                     target_parent_id=target_parent_id
                 )
             else:
+                logger.info("1-Pass Import 모드로 실행합니다.")
                 import_all(
                     inline_images=inline_images_import,
                     force_update=force_update,
@@ -209,21 +266,45 @@ def interactive_mode():
             logger.info("=" * 60)
             logger.info("STEP 1: Export 시작")
             logger.info("=" * 60)
+            try:
+                login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
+            except Exception as e:
+                logger.error(f"로그인 실패로 export 중단: {e}")
+                print(f"로그인 실패: {e}")
+                return
             export_all(old_session, OLD_BASE, SPACE,
                        root_page_id=root_page_id,
-                       inline_images=inline_images_export)
+                       inline_images=inline_images_export,
+                       workers=export_workers)  # ✨ 추가
 
             # Import
             logger.info("")
             logger.info("=" * 60)
             logger.info("STEP 2: Import 시작")
             logger.info("=" * 60)
-            import_all(
-                inline_images=inline_images_import,
-                force_update=force_update,
-                root_page_id=import_root_page_id,
-                target_parent_id=target_parent_id
-            )
+            try:
+                login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+            except Exception as e:
+                logger.error(f"로그인 실패로 import 중단: {e}")
+                print(f"로그인 실패: {e}")
+                return
+
+            if use_two_pass:
+                logger.info("🚀 2-Pass Import 모드로 실행합니다.")
+                import_all_two_pass(
+                    inline_images=inline_images_import,
+                    force_update=force_update,
+                    root_page_id=import_root_page_id,
+                    target_parent_id=target_parent_id
+                )
+            else:
+                logger.info("1-Pass Import 모드로 실행합니다.")
+                import_all(
+                    inline_images=inline_images_import,
+                    force_update=force_update,
+                    root_page_id=import_root_page_id,
+                    target_parent_id=target_parent_id
+                )
 
         print()
         print("=" * 60)
@@ -233,6 +314,8 @@ def interactive_mode():
     except Exception as e:
         logger.error(f"작업 중 오류 발생: {e}")
         print(f"\n오류: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -260,7 +343,12 @@ def main():
     parser.add_argument('--two-pass', action='store_true',
                         help='2-Pass Import 사용 (링크 변환 개선)')
 
+    # 이제 모든 인자가 등록되었으므로 한 번만 파싱합니다.
     args = parser.parse_args()
+
+    # --workers가 설정되면 환경변수로 전달 (기존 동작 유지)
+    if getattr(args, 'workers', None) is not None:
+        os.environ['MAX_WORKERS'] = str(args.workers)
 
     # 대화형 모드 vs 명령줄 모드
     if args.mode is None and not args.non_interactive:
@@ -269,12 +357,26 @@ def main():
     elif args.mode:
         # 명령줄 모드
         if args.mode == 'export':
+            try:
+                login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
+            except Exception as e:
+                logger.error(f"로그인 실패로 export 중단: {e}")
+                print(f"로그인 실패: {e}")
+                sys.exit(1)
             export_all(old_session, OLD_BASE, SPACE,
                        root_page_id=args.page_id,
-                       inline_images=args.inline_images)
+                       inline_images=args.inline_images,
+                       workers=args.workers)
 
         elif args.mode == 'import' or args.mode == 'import2':
             # import2 또는 --two-pass 플래그가 있으면 2-Pass Import
+            # 로그인
+            try:
+                login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+            except Exception as e:
+                logger.error(f"로그인 실패로 import 중단: {e}")
+                print(f"로그인 실패: {e}")
+                sys.exit(1)
             if args.mode == 'import2' or args.two_pass:
                 logger.info("2-Pass Import 모드로 실행합니다.")
                 import_all_two_pass(
@@ -296,9 +398,16 @@ def main():
         elif args.mode == 'migrate':
             export_all(old_session, OLD_BASE, SPACE,
                        root_page_id=args.page_id,
-                       inline_images=args.inline_images)
+                       inline_images=args.inline_images,
+                       workers=args.workers)
 
             # migrate도 2-Pass 옵션 지원
+            try:
+                login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+            except Exception as e:
+                logger.error(f"로그인 실패로 import 중단: {e}")
+                print(f"로그인 실패: {e}")
+                sys.exit(1)
             if args.two_pass:
                 logger.info("2-Pass Import 모드로 실행합니다.")
                 import_all_two_pass(

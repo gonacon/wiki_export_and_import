@@ -17,7 +17,7 @@ NEW_PASS = os.getenv("N_PASS")
 SPACE = os.getenv("SPACE", "GFTCDEV")
 NEW_SPACE = os.getenv("NEW_SPACE", "~1004592")
 
-EXPORT_DIR = os.getenv("EXPORT_DIR", "../wiki_down_upload_export")
+EXPORT_DIR = os.getenv("EXPORT_DIR", "./wiki_down_upload_export")
 FAILED_GLIFFY_LOG = os.path.join(EXPORT_DIR, "failed_gliffy.json")
 RESUME_FILE = os.path.join(EXPORT_DIR, "resume_state.json")
 
@@ -55,3 +55,26 @@ def setup_logger():
 # 초기화
 logger = setup_logger()
 
+
+def login(session, base, user, password):
+    """로그인: 세션에 인증 쿠키를 설정합니다. 사용자명/비밀번호가 없으면 경고 후 리턴합니다.
+
+    이 함수는 기존 single-file 구현과 유사하게 POST /dologin.action을 호출합니다.
+    실패하면 예외를 발생시켜 호출자에서 처리하게 합니다.
+    """
+    if not user or not password:
+        logger.warning(f"로그인 정보 미설정: base={base} (user 또는 password 없음). 로그인 건너뜀")
+        return
+    url = f"{base}/dologin.action"
+    data = {
+        "os_username": user,
+        "os_password": password,
+        "login": "Log in",
+    }
+    try:
+        r = session.post(url, data=data, timeout=15)
+        r.raise_for_status()
+    except Exception as e:
+        logger.error(f"로그인 실패: {base} (error={e})")
+        raise
+    logger.info(f"로그인 성공: {base}")
