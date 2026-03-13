@@ -106,8 +106,16 @@ def load_resume_state(resume_file=None):
 
 def save_resume_state(state, resume_file=None):
     path = resume_file or os.path.join(EXPORT_DIR, "resume_state.json")
-    with open(path, "w", encoding="utf-8") as f:
+    # atomic write: write to temp file then replace
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+    try:
+        os.replace(tmp_path, path)
+    except Exception:
+        # fallback
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 def download_gliffy_thumbnails(page, folder):
