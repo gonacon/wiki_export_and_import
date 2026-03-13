@@ -210,40 +210,51 @@ def fix_url_images_in_html(html_text, attachments_dir, session):
         re.DOTALL | re.IGNORECASE
     )
 
+    # wrapper-aware pattern: ac:link > ri:page ... > ac:link-body > ac:image(...ri:url...) </ac:link-body></ac:link>
+    wrapper_pattern = re.compile(
+        r'(<ac:link\b[^>]*>\s*<ri:page[^>]*>\s*<ac:link-body[^>]*>)(<ac:image[^>]*>.*?<ri:url\s+ri:value="([^"]+)"\s*/?>.*?</ac:image>)(\s*</ac:link-body>\s*</ac:link>)',
+        re.DOTALL | re.IGNORECASE
+    )
+
     downloaded_files = {}  # URL -> filename 매핑
 
-    def download_and_convert(match):
-        """이미지 블록을 변환"""
-        full_block = match.group(0)
-        url = match.group(1)
-
-        # URL 디코딩 (HTML 엔티티)
-        url = url.replace('&amp;', '&')
-
-        # 이미 다운로드한 경우
-        if url in downloaded_files:
-            filename = downloaded_files[url]
+    def download_and_convert_block(url, full_block):
+        url_clean = url.replace('&amp;', '&')
+        if url_clean in downloaded_files:
+            filename = downloaded_files[url_clean]
         else:
-            # 다운로드
-            filename = download_url_image(url, attachments_dir, session)
+            filename = download_url_image(url_clean, attachments_dir, session)
             if filename:
-                downloaded_files[url] = filename
+                downloaded_files[url_clean] = filename
             else:
-                # 다운로드 실패 시 원본 유지
-                return full_block
-
-        # <ri:url>을 <ri:attachment>로 변경
-        # ac:alt 속성 추출
+                return None
         alt_match = re.search(r'ac:alt="([^"]*)"', full_block)
         alt_text = alt_match.group(1) if alt_match else filename
-
-        # 새로운 이미지 블록 생성
         new_block = f'<ac:image ac:alt="{alt_text}"><ri:attachment ri:filename="{filename}" /></ac:image>'
-
-        logger.info(f"URL 이미지 변환: {url} → {filename}")
+        logger.info(f"URL 이미지 변환: {url_clean} → {filename}")
         return new_block
 
-    # 변환 실행
+    # 1) 먼저 ac:link > ac:link-body 래퍼 안의 이미지를 처리하여 래퍼를 보존
+    def wrapper_repl(m):
+        open_wrapper = m.group(1)
+        image_block = m.group(2)
+        url = m.group(3)
+        close_wrapper = m.group(4)
+        replaced = download_and_convert_block(url, image_block)
+        if replaced:
+            return open_wrapper + replaced + close_wrapper
+        # 실패하면 원본 유지
+        return m.group(0)
+
+    html_text = wrapper_pattern.sub(wrapper_repl, html_text)
+
+    # 2) 그 외의 standalone <ac:image> 블록 처리
+    def download_and_convert(match):
+        full_block = match.group(0)
+        url = match.group(1)
+        replaced = download_and_convert_block(url, full_block)
+        return replaced or full_block
+
     converted_html = image_block_pattern.sub(download_and_convert, html_text)
 
     if downloaded_files:

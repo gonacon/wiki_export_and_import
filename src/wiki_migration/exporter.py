@@ -1,11 +1,13 @@
 import os
 import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from .config import old_session, EXPORT_DIR, MAX_WORKERS
 from .utils import safe_folder_name, fix_image_links_html, md_convert, convert_images_to_inline, fix_url_images_in_html
 from .io_utils import download_attachments_for_page, load_resume_state, save_resume_state, ensure_export_pages_dir, save_page_files_v2
 import logging
+import datetime
 
 logger = logging.getLogger("wiki_migrate")
 
@@ -165,6 +167,32 @@ def export_all(old_session, old_base, space, root_page_id=None, inline_images=Fa
         inline_images: 이미지 인라인 변환 여부
         workers: 멀티스레드 워커 수 (None이면 MAX_WORKERS 사용)
     """
+    # 기존 export pages 폴더가 있으면 삭제하여 깨끗한 상태에서 시작합니다.
+    pages_dir = os.path.join(EXPORT_DIR, "pages")
+    if os.path.exists(pages_dir):
+        # 자동 백업: EXPORT_DIR/backups/<timestamp>/ 아래로 이동
+        backups_root = os.path.join(EXPORT_DIR, 'backups')
+        os.makedirs(backups_root, exist_ok=True)
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_subdir = os.path.join(backups_root, f"pages_backup_{ts}")
+        try:
+            shutil.move(pages_dir, backup_subdir)
+            logger.info(f"기존 export 폴더 백업됨: {backup_subdir}")
+        except Exception as e:
+            logger.warning(f"기존 export 폴더 백업 실패({pages_dir} -> {backup_subdir}): {e}")
+
+        # resume_state.json 및 failed_pages.json, pages.json, migrate.log 등 관련 파일들도 백업 폴더로 이동
+        for fname in ('resume_state.json', 'failed_pages.json', 'pages.json', 'migrate.log'):
+            src = os.path.join(EXPORT_DIR, fname)
+            if os.path.exists(src):
+                try:
+                    # backup_subdir가 없을 수 있으니 미리 생성
+                    os.makedirs(backup_subdir, exist_ok=True)
+                    shutil.move(src, os.path.join(backup_subdir, fname))
+                    logger.info(f"백업된 파일: {src} -> {backup_subdir}")
+                except Exception as e:
+                    logger.warning(f"파일 백업 실패({src}): {e}")
+
     ensure_export_pages_dir()
     resume_state = load_resume_state()
     pages = get_all_pages(old_session, old_base, space, root_page_id=root_page_id)
