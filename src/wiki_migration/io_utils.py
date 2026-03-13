@@ -53,12 +53,15 @@ def save_page_files_v2(page, folder, html, markdown, converted_html=None):
     except Exception as e:
         logger.warning(f"page.storage.html 저장 실패 [{title}]: {e}")
 
-    if converted_html is not None:
-        try:
-            with open(os.path.join(folder, "page.storage.converted.html"), "w", encoding="utf-8") as f:
-                f.write(converted_html)
-        except Exception as e:
-            logger.warning(f"page.storage.converted.html 저장 실패 [{title}]: {e}")
+    # 항상 converted 파일을 생성하도록 변경: 변환 결과가 없으면 원본 HTML을 사용
+    try:
+        to_write = converted_html if converted_html is not None else html
+        with open(os.path.join(folder, "page.storage.converted.html"), "w", encoding="utf-8") as f:
+            f.write(to_write)
+        if converted_html is None:
+            logger.debug(f"converted_html 없음: 원본 HTML로 page.storage.converted.html 생성 [{title}]")
+    except Exception as e:
+        logger.warning(f"page.storage.converted.html 저장 실패 [{title}]: {e}")
 
     with open(os.path.join(folder, "page.md"), "w", encoding="utf-8") as f:
         f.write(markdown)

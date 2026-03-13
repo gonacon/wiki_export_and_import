@@ -6,6 +6,7 @@ import logging
 import datetime
 from tqdm import tqdm
 from .config import old_session, EXPORT_DIR, MAX_WORKERS
+import traceback
 from .utils import (
     safe_folder_name,
     fix_image_links_html,
@@ -157,7 +158,13 @@ def process_page(i, page, inline_images, resume_state, old_session=old_session):
             repaired_html = raw_html
 
         # 2) 외부 URL 이미지를 다운로드하여 로컬 첨부파일로 변환
-        converted_html = fix_url_images_in_html(repaired_html, os.path.join(folder, "attachments"), old_session)
+        try:
+            converted_html = fix_url_images_in_html(repaired_html, os.path.join(folder, "attachments"), old_session)
+        except Exception as e:
+            # 변환 중 문제가 생기면 원본(repaired_html)을 사용하고 로그를 남깁니다.
+            logger.warning(f"URL 이미지 변환 중 오류 발생, 원본 HTML로 대체합니다: {e}")
+            logger.debug(traceback.format_exc())
+            converted_html = repaired_html
 
         # 3) 로컬에 존재하는 첨부파일에 대해 ri:url을 ri:attachment로 치환 (링크 깨짐 방지)
         try:
@@ -166,8 +173,19 @@ def process_page(i, page, inline_images, resume_state, old_session=old_session):
             logger.debug(f"ri:url -> ri:attachment 변환 실패 (무시하고 계속 진행): {e}")
 
         # HTML 내 이미지 링크를 로컬 경로로 수정하고 마크다운으로 변환
-        html_local = fix_image_links_html(converted_html, os.path.join(EXPORT_DIR, 'pages'))
-        markdown = md_convert(html_local, heading_style='ATX')
+        try:
+            html_local = fix_image_links_html(converted_html, os.path.join(EXPORT_DIR, 'pages'))
+        except Exception as e:
+            logger.warning(f"이미지 링크 보정 중 오류 발생, 원본 HTML로 대체합니다: {e}")
+            logger.debug(traceback.format_exc())
+            html_local = converted_html or repaired_html or raw_html
+
+        try:
+            markdown = md_convert(html_local, heading_style='ATX')
+        except Exception as e:
+            logger.warning(f"HTML -> Markdown 변환 실패 [{title}]: {e}")
+            logger.debug(traceback.format_exc())
+            markdown = ''
 
         # 파일 저장: page.storage.html=원본, 변환본은 별도 파일
         save_page_files_v2(page, folder, raw_html, markdown, converted_html)

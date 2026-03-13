@@ -229,11 +229,18 @@ def fix_url_images_in_html(html_text, attachments_dir, session):
                 downloaded_files[url_clean] = filename
             else:
                 return None
+        # alt는 기존 태그에서 추출하되, 변환은 ri:url 태그만 교체하여
+        # 기존 <ac:image ...> 속성 및 다른 내부 콘텐츠를 보존합니다.
         alt_match = re.search(r'ac:alt="([^"]*)"', full_block)
         alt_text = alt_match.group(1) if alt_match else filename
-        new_block = f'<ac:image ac:alt="{alt_text}"><ri:attachment ri:filename="{filename}" /></ac:image>'
-        logger.info(f"URL 이미지 변환: {url_clean} → {filename}")
-        return new_block
+        # replace only the ri:url tag inside the full_block
+        try:
+            new_block = re.sub(r'<ri:url\s+ri:value="[^"]+"\s*/?>', f'<ri:attachment ri:filename="{html.escape(filename)}" />', full_block, flags=re.IGNORECASE)
+            logger.info(f"URL 이미지 변환: {url_clean} → {filename}")
+            return new_block
+        except Exception as e:
+            logger.debug(f"ri:url 태그 교체 실패: {e}")
+            return None
 
     # 1) 먼저 ac:link > ac:link-body 래퍼 안의 이미지를 처리하여 래퍼를 보존
     def wrapper_repl(m):
@@ -467,6 +474,8 @@ def convert_ri_url_to_attachment_if_exists(html_text, attachments_dir):
         m = ALT_RE.search(text)
         return m.group(1) if m else ''
 
+    replacements = 0
+
     def repl(m):
         open_tag = m.group(1) or ''
         inner = m.group(2) or ''
@@ -483,6 +492,14 @@ def convert_ri_url_to_attachment_if_exists(html_text, attachments_dir):
             return m.group(0)
         # replace only the ri:url tag with ri:attachment, keep other inner content
         new_inner = RI_URL_RE.sub(f'<ri:attachment ri:filename="{html.escape(found)}" />', inner)
+        nonlocal replacements
+        replacements += 1
+        logger.debug(f"ri:url -> ri:attachment 변환: {url} -> {found}")
         return open_tag + new_inner + close_tag
 
-    return IMAGE_BLOCK_RE.sub(repl, html_text)
+    result = IMAGE_BLOCK_RE.sub(repl, html_text)
+    if replacements:
+        logger.info(f"convert_ri_url_to_attachment_if_exists: {replacements}개 변환 (attachments_dir={attachments_dir})")
+    else:
+        logger.debug(f"convert_ri_url_to_attachment_if_exists: 변경 없음 (attachments_dir={attachments_dir})")
+    return result
