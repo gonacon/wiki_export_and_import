@@ -6,6 +6,7 @@ import markdown2
 import logging
 from markdownify import markdownify as md_convert
 from urllib.parse import urlparse, unquote
+import traceback
 
 logger = logging.getLogger("wiki_migrate")
 
@@ -42,7 +43,7 @@ def convert_images_to_inline(markdown_text, attachments_dir):
             b64 = base64.b64encode(f.read()).decode('utf-8')
         return f'![{alt}](data:{mime};base64,{b64})'
 
-    pattern = re.compile(r'!\[([^]]*)][(]\.\/attachments\/([^)]+)[)]')
+    pattern = re.compile(r'!\[([^]]*)\]\(\./attachments/([^)]+)\)')
     return pattern.sub(replacer, markdown_text)
 
 
@@ -63,7 +64,7 @@ def convert_local_imgs_to_acimage(html_text):
         safe_name = html.escape(filename, quote=True)
         return f'<ac:image><ri:attachment ri:filename="{safe_name}" /></ac:image>'
 
-    md_pattern = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
+    md_pattern = re.compile(r'!\[([^]]*)\]\(([^)]+)\)')
 
     def md_repl(m):
         src = m.group(1).strip()
@@ -76,7 +77,7 @@ def convert_local_imgs_to_acimage(html_text):
 
     converted = md_pattern.sub(md_repl, html_text)
 
-    img_pattern = re.compile(r'<img\b[^>]*\bsrc=("|\')(.*?)\1[^>]*>', re.IGNORECASE)
+    img_pattern = re.compile(r"<img\b[^>]*\bsrc=(['\"])(.*?)\1[^>]*>", re.IGNORECASE)
 
     def img_repl(m):
         src = m.group(2).strip()
@@ -396,7 +397,6 @@ def convert_internal_links_with_pageid(html_text, old_base, new_base, page_map, 
 
         except Exception as e:
             logger.warning(f"링크 변환 중 오류: {url}, {e}")
-            import traceback
             logger.debug(traceback.format_exc())
             return match.group(0)
 
@@ -417,3 +417,72 @@ def convert_internal_links_with_pageid(html_text, old_base, new_base, page_map, 
         logger.warning(f"변환 실패: {failed_links[:10]}")
 
     return converted_html
+
+
+def convert_ri_url_to_attachment_if_exists(html_text, attachments_dir):
+    """
+    안전 변환: <ac:image> 내부의 <ri:url ri:value="..."/> 를 attachments 디렉토리에서
+    실제 파일명이 존재하면 <ri:attachment ri:filename="..."/> 로 교체합니다.
+    다른 본문/매크로는 건드리지 않습니다.
+
+    Args:
+        html_text: 원본 HTML
+        attachments_dir: 첨부파일 폴더 경로(문자열)
+
+    Returns:
+        변환된 HTML (원본을 변경하지 않음)
+    """
+    import re
+    import os
+    import unicodedata
+    from urllib.parse import urlparse, unquote
+
+    IMAGE_BLOCK_RE = re.compile(r'(<ac:image\b[^>]*>)(.*?)(</ac:image>)', re.DOTALL | re.IGNORECASE)
+    RI_URL_RE = re.compile(r'<ri:url\s+ri:value="([^"]+)"\s*/?>', re.IGNORECASE)
+    ALT_RE = re.compile(r'ac:alt="([^"]*)"', re.IGNORECASE)
+
+    def filename_from_url(url):
+        parsed = urlparse(url.replace('&amp;', '&'))
+        path = unquote(parsed.path)
+        fname = os.path.basename(path)
+        if not fname:
+            return ''
+        return fname.split('?')[0]
+
+    def find_attachment_file(dirpath, fname):
+        try:
+            if not dirpath or not os.path.isdir(dirpath):
+                return None
+            files = [f for f in os.listdir(dirpath) if os.path.isfile(os.path.join(dirpath, f))]
+            nmap = {unicodedata.normalize('NFC', f): f for f in files}
+            nf = unicodedata.normalize('NFC', fname)
+            if nf in nmap:
+                return nmap[nf]
+            lower_map = {unicodedata.normalize('NFC', f).lower(): f for f in files}
+            return lower_map.get(nf.lower())
+        except Exception:
+            return None
+
+    def extract_alt(text):
+        m = ALT_RE.search(text)
+        return m.group(1) if m else ''
+
+    def repl(m):
+        open_tag = m.group(1) or ''
+        inner = m.group(2) or ''
+        close_tag = m.group(3) or ''
+        url_m = RI_URL_RE.search(inner)
+        if not url_m:
+            return m.group(0)
+        url = url_m.group(1)
+        fname = filename_from_url(url)
+        if not fname:
+            return m.group(0)
+        found = find_attachment_file(attachments_dir, fname)
+        if not found:
+            return m.group(0)
+        # replace only the ri:url tag with ri:attachment, keep other inner content
+        new_inner = RI_URL_RE.sub(f'<ri:attachment ri:filename="{html.escape(found)}" />', inner)
+        return open_tag + new_inner + close_tag
+
+    return IMAGE_BLOCK_RE.sub(repl, html_text)
