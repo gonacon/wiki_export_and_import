@@ -3,6 +3,7 @@ import json
 import time
 import re
 import logging
+import hashlib
 from .config import EXPORT_DIR, OLD_BASE, old_session, MAX_RETRIES, RETRY_DELAY, FAILED_GLIFFY_LOG, MAX_WORKERS
 from .utils import safe_folder_name
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -76,22 +77,90 @@ def save_page_files_v2(page, folder, html, markdown, converted_html=None):
 
     return folder
 
+
+def _load_manifest(att_dir):
+    manifest_path = os.path.join(att_dir, 'manifest.json')
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_manifest(att_dir, manifest):
+    manifest_path = os.path.join(att_dir, 'manifest.json')
+    try:
+        with open(manifest_path + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        os.replace(manifest_path + '.tmp', manifest_path)
+    except Exception:
+        try:
+            with open(manifest_path, 'w', encoding='utf-8') as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+        except Exception:
+            logger.debug('manifest 저장 실패')
+
+
+def _write_bytes_unique(save_dir, filename, content_bytes, unique_key=None):
+    """파일을 저장하되 동일한 이름이 존재하면 내용 비교 후 필요 시 해시 접두사로 고유화하여 저장.
+    Returns: saved_filename
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    base_path = os.path.join(save_dir, filename)
+    # 만약 파일이 없으면 바로 쓰기
+    if not os.path.exists(base_path):
+        with open(base_path, 'wb') as f:
+            f.write(content_bytes)
+        return filename
+    # 파일이 존재하면 내용 비교
+    try:
+        with open(base_path, 'rb') as f:
+            existing = f.read()
+        if existing == content_bytes:
+            return filename
+    except Exception:
+        pass
+    # 내용이 다르면 unique_key 또는 내용 기반 해시를 만들어 접두사로 사용
+    key_source = unique_key or content_bytes
+    if isinstance(key_source, bytes):
+        h = hashlib.sha1(key_source).hexdigest()[:8]
+    else:
+        h = hashlib.sha1(str(key_source).encode('utf-8')).hexdigest()[:8]
+    new_name = f"{h}__{filename}"
+    new_path = os.path.join(save_dir, new_name)
+    # 안전하게 쓰기
+    with open(new_path, 'wb') as f:
+        f.write(content_bytes)
+    return new_name
+
+
 def download_attachments_for_page(page, folder):
     url = f"{OLD_BASE}/rest/api/content/{page['id']}/child/attachment"
     r = old_session.get(url)
     results = r.json().get('results', [])
+    att_dir = os.path.join(folder, "attachments")
+    os.makedirs(att_dir, exist_ok=True)
+    manifest = _load_manifest(att_dir)
     for att in results:
         link = OLD_BASE + att["_links"]["download"]
-        name = att["title"]
-        path = os.path.join(folder, "attachments", name)
-        if os.path.exists(path):
-            logger.debug(f"첨부파일 이미 존재 (skip): {name}")
-            continue
+        name = att.get("title") or att.get('fileName') or 'attachment.bin'
         try:
+            # 이미 manifest에 매핑이 있으면 skip(파일이 존재함)
+            if manifest.get(link):
+                logger.debug(f"manifest에 이미 있음, skip: {link} -> {manifest.get(link)}")
+                continue
             resp = old_session.get(link)
-            with open(path, "wb") as f:
-                f.write(resp.content)
-            logger.debug(f"첨부파일 다운로드: {name}")
+            content = resp.content
+            saved_name = _write_bytes_unique(att_dir, name, content, unique_key=link)
+            manifest[link] = saved_name
+            # 또한 title 기반 fallback 매핑 (같은 title로 참조될 경우를 위해)
+            manifest.setdefault('title_map', {})
+            if name not in manifest['title_map']:
+                manifest['title_map'][name] = saved_name
+            _save_manifest(att_dir, manifest)
+            logger.debug(f"첨부파일 다운로드: {name} -> {saved_name}")
         except Exception as e:
             logger.error(f"첨부파일 다운로드 실패 [{name}]: {e}")
 
@@ -128,7 +197,7 @@ def download_gliffy_thumbnails(page, folder):
     os.makedirs(att_dir, exist_ok=True)
 
     GLIFFY_RE = re.compile(r'<ac:structured-macro[^>]+ac:name="gliffy"[^>]*>(.*?)</ac:structured-macro>', re.DOTALL | re.IGNORECASE)
-    PARAM_RE = re.compile(r'<ac:parameter\s+ac:name="([^\"]+)"\s*>(.*?)</ac:parameter>', re.DOTALL | re.IGNORECASE)
+    PARAM_RE = re.compile(r'<ac:parameter\s+ac:name="([^"]+)"\s*>(.*?)</ac:parameter>', re.DOTALL | re.IGNORECASE)
 
     for macro_match in GLIFFY_RE.finditer(content):
         macro_body = macro_match.group(0)
@@ -163,6 +232,15 @@ def download_gliffy_thumbnails(page, folder):
                     resp = old_session.get(url, timeout=15)
                     content_type = resp.headers.get("Content-Type", "")
                     if resp.status_code == 200 and content_type.startswith("image/"):
+                        # write using unique-writer to avoid overwriting same-name different content
+                        saved_name = _write_bytes_unique(att_dir, out_filename, resp.content, unique_key=url)
+                        # update manifest
+                        manifest = _load_manifest(att_dir)
+                        manifest[url] = saved_name
+                        manifest.setdefault('title_map', {})
+                        manifest['title_map'].setdefault(out_filename, saved_name)
+                        _save_manifest(att_dir, manifest)
+
                         with open(out_path, "wb") as f:
                             f.write(resp.content)
                         logger.info(f"Gliffy 썸네일 다운로드 성공: {out_filename} (url={url}, size={len(resp.content)}bytes)")

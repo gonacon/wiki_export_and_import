@@ -7,6 +7,8 @@ import logging
 from markdownify import markdownify as md_convert
 from urllib.parse import urlparse, unquote
 import traceback
+import json
+import hashlib
 
 logger = logging.getLogger("wiki_migrate")
 
@@ -43,7 +45,7 @@ def convert_images_to_inline(markdown_text, attachments_dir):
             b64 = base64.b64encode(f.read()).decode('utf-8')
         return f'![{alt}](data:{mime};base64,{b64})'
 
-    pattern = re.compile(r'!\[([^]]*)\]\(\./attachments/([^)]+)\)')
+    pattern = re.compile(r'!\[(.*?)\]\(\./attachments/([^)]+)\)')
     return pattern.sub(replacer, markdown_text)
 
 
@@ -64,7 +66,7 @@ def convert_local_imgs_to_acimage(html_text):
         safe_name = html.escape(filename, quote=True)
         return f'<ac:image><ri:attachment ri:filename="{safe_name}" /></ac:image>'
 
-    md_pattern = re.compile(r'!\[([^]]*)\]\(([^)]+)\)')
+    md_pattern = re.compile(r'!\[(.*?)\]\(([^)]+)\)')
 
     def md_repl(m):
         src = m.group(1).strip()
@@ -138,22 +140,87 @@ def extract_filename_from_url(url):
     return filename
 
 
+def _load_manifest(att_dir):
+    manifest_path = os.path.join(att_dir, 'manifest.json')
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_manifest(att_dir, manifest):
+    manifest_path = os.path.join(att_dir, 'manifest.json')
+    try:
+        with open(manifest_path + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        os.replace(manifest_path + '.tmp', manifest_path)
+    except Exception:
+        try:
+            with open(manifest_path, 'w', encoding='utf-8') as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+        except Exception:
+            logger.debug('manifest 저장 실패')
+
+
+def _write_bytes_unique(save_dir, filename, content_bytes, unique_key=None):
+    os.makedirs(save_dir, exist_ok=True)
+    base_path = os.path.join(save_dir, filename)
+    # 파일이 없으면 바로 쓰기
+    if not os.path.exists(base_path):
+        with open(base_path, 'wb') as f:
+            f.write(content_bytes)
+        return filename
+    # 파일이 있으면 내용 비교
+    try:
+        with open(base_path, 'rb') as f:
+            existing = f.read()
+        if existing == content_bytes:
+            return filename
+    except Exception:
+        pass
+    # 내용이 다르면 unique_key 또는 내용 기반 해시로 접두사 생성
+    key_source = unique_key or content_bytes
+    if isinstance(key_source, bytes):
+        h = hashlib.sha1(key_source).hexdigest()[:8]
+    else:
+        h = hashlib.sha1(str(key_source).encode('utf-8')).hexdigest()[:8]
+    new_name = f"{h}__{filename}"
+    new_path = os.path.join(save_dir, new_name)
+    with open(new_path, 'wb') as f:
+        f.write(content_bytes)
+    return new_name
+
+
 def download_url_image(url, save_dir, session, filename=None):
     """
-    URL 이미지를 다운로드하여 저장
+    URL 이미지를 다운로드하여 저장 (manifest 기반)
 
     Args:
         url: 이미지 URL
         save_dir: 저장 디렉토리
-        session: requests.Session 객체
+        session: requests-like 세션
         filename: 저장할 파일명 (None이면 URL에서 추출)
 
     Returns:
         저장된 파일명 또는 None (실패 시)
     """
     try:
+        os.makedirs(save_dir, exist_ok=True)
+        manifest = _load_manifest(save_dir)
+
+        url_clean = url.replace('&amp;', '&')
+        # manifest에 이미 매핑이 있으면 해당 파일이 존재하는지 확인하고 리턴
+        if manifest.get(url_clean):
+            existing = manifest.get(url_clean)
+            if os.path.exists(os.path.join(save_dir, existing)):
+                logger.debug(f"manifest에 매핑된 파일 재사용: {existing}")
+                return existing
+
         if not filename:
-            filename = extract_filename_from_url(url)
+            filename = extract_filename_from_url(url_clean)
 
         # 파일명 안전하게 처리
         filename = safe_folder_name(filename)
@@ -162,23 +229,23 @@ def download_url_image(url, save_dir, session, filename=None):
             logger.warning(f"파일명 추출 실패: {url}")
             return None
 
-        save_path = os.path.join(save_dir, filename)
-
-        # 이미 다운로드된 경우 skip
-        if os.path.exists(save_path):
-            logger.debug(f"이미지 이미 존재 (skip): {filename}")
-            return filename
-
         # 다운로드
-        resp = session.get(url, timeout=30)
+        resp = session.get(url_clean, timeout=30)
         resp.raise_for_status()
+        content = resp.content
 
-        # 저장
-        with open(save_path, 'wb') as f:
-            f.write(resp.content)
+        # 저장 (충돌 시 내용 비교 후 고유화)
+        saved_name = _write_bytes_unique(save_dir, filename, content, unique_key=url_clean)
 
-        logger.debug(f"URL 이미지 다운로드 완료: {filename}")
-        return filename
+        # manifest 업데이트
+        manifest[url_clean] = saved_name
+        manifest.setdefault('title_map', {})
+        if filename not in manifest['title_map']:
+            manifest['title_map'][filename] = saved_name
+        _save_manifest(save_dir, manifest)
+
+        logger.debug(f"URL 이미지 다운로드 완료: {saved_name}")
+        return saved_name
 
     except Exception as e:
         logger.error(f"URL 이미지 다운로드 실패 [{url}]: {e}")
@@ -460,6 +527,12 @@ def convert_ri_url_to_attachment_if_exists(html_text, attachments_dir):
         try:
             if not dirpath or not os.path.isdir(dirpath):
                 return None
+            # 먼저 manifest가 있으면 title_map으로 매핑
+            manifest = _load_manifest(dirpath)
+            title_map = manifest.get('title_map', {}) if isinstance(manifest, dict) else {}
+            if fname in title_map:
+                return title_map[fname]
+            # 기존 방식: 파일명 정규화 및 대소문자 체크
             files = [f for f in os.listdir(dirpath) if os.path.isfile(os.path.join(dirpath, f))]
             nmap = {unicodedata.normalize('NFC', f): f for f in files}
             nf = unicodedata.normalize('NFC', fname)

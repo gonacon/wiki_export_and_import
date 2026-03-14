@@ -349,6 +349,15 @@ def main():
     # --workers가 설정되면 환경변수로 전달 (기존 동작 유지)
     if getattr(args, 'workers', None) is not None:
         os.environ['MAX_WORKERS'] = str(args.workers)
+        try:
+            # 이미 import된 config 모듈의 MAX_WORKERS도 갱신하여 import 모듈들이
+            # CLI로 전달된 워커 수를 반영하도록 한다.
+            from . import config
+            config.MAX_WORKERS = args.workers
+            logger.info(f"MAX_WORKERS set to {args.workers} from CLI")
+        except Exception:
+            # 안전하게 실패 허용: 환경변수만 설정되어 있어도 다른 실행 경로에서 동작함
+            pass
 
     # 대화형 모드 vs 명령줄 모드
     if args.mode is None and not args.non_interactive:
