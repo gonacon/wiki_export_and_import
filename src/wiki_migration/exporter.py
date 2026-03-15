@@ -166,6 +166,13 @@ def process_page(i, page, inline_images, resume_state, old_session=old_session):
             logger.debug(traceback.format_exc())
             converted_html = repaired_html
 
+        # 안전 보완: <ri:attachment> 내부에 <ri:page>가 남아있을 경우 정규화
+        try:
+            if converted_html:
+                converted_html = Sanitizer.normalize_ri_attachment_refs(converted_html)
+        except Exception as e:
+            logger.debug(f"normalize_ri_attachment_refs 실패 (무시): {e}")
+
         # 3) 로컬에 존재하는 첨부파일에 대해 ri:url을 ri:attachment로 치환 (링크 깨짐 방지)
         try:
             converted_html = convert_ri_url_to_attachment_if_exists(converted_html, os.path.join(folder, "attachments"))

@@ -53,6 +53,11 @@ def main(root_dir=None):
                 raw = f.read()
             repaired = Sanitizer.repair_broken_confluence_links(raw)
             converted_html = fix_url_images_in_html(repaired, att_dir, session)
+            # normalize any remaining ri:attachment refs (remove nested ri:page etc.)
+            try:
+                converted_html = Sanitizer.normalize_ri_attachment_refs(converted_html)
+            except Exception:
+                pass
             with open(out_path, 'w', encoding='utf-8') as f:
                 f.write(converted_html)
             converted += 1
@@ -75,4 +80,3 @@ def main(root_dir=None):
 if __name__ == '__main__':
     arg = sys.argv[1] if len(sys.argv) > 1 else None
     sys.exit(main(arg))
-

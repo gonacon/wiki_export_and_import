@@ -255,3 +255,61 @@ class Sanitizer:
                 return full_block
 
         return url_pattern.sub(replace_with_attachment, html_text)
+
+    @staticmethod
+    def normalize_ri_attachment_refs(html_text):
+        """
+        <ri:attachment> 내부에 <ri:page .../> 같은 참조가 포함된 경우,
+        해당 <ri:attachment> 블록을 self-closing 형태로 정규화합니다.
+
+        예: <ac:image> <ri:attachment ri:filename="a.jpg"> <ri:page .../> </ri:attachment> </ac:image>
+        -> <ac:image> <ri:attachment ri:filename="a.jpg" /> </ac:image>
+
+        안전성: 파일명(ri:filename) 추출이 실패하면 원본 블록을 그대로 둡니다.
+        """
+        import re
+        import html as _html
+
+        # 이미지 블록 단위로 순회
+        IMAGE_BLOCK_RE = re.compile(r'(<ac:image\b[^>]*>)(.*?)(</ac:image>)', re.DOTALL | re.IGNORECASE)
+
+        def _repl_image(m):
+            open_tag, inner, close_tag = m.group(1), m.group(2), m.group(3)
+
+            # 이미 self-closing ri:attachment이 있으면 건드리지 않음
+            if re.search(r'<ri:attachment\b[^>]*/>\s*', inner, re.IGNORECASE):
+                return m.group(0)
+
+            # 전체 inner에서 ri:attachment 블록 찾기
+            ATT_RE = re.compile(r'<ri:attachment\b([^>]*)>(.*?)</ri:attachment>', re.DOTALL | re.IGNORECASE)
+
+            def _repl_att(att_m):
+                attrs = att_m.group(1)
+                # ri:filename 추출 (큰따옴표 또는 작은따옴표)
+                fn_m = re.search(r'ri:filename\s*=\s*(?:"([^"]+)"|\'([^\']+)\')', attrs)
+                if not fn_m:
+                    # inner content 안에 manifest-like URL이 있을 경우 시도 추출
+                    # (예: download/attachments/12345/IMG.jpg)
+                    path_m = re.search(r'/download/attachments/[^/]+/([^"\'>\s?]+)', att_m.group(2) or '', re.IGNORECASE)
+                    if path_m:
+                        filename = path_m.group(1)
+                    else:
+                        return att_m.group(0)  # 못 찾으면 원본 유지
+                else:
+                    filename = fn_m.group(1) or fn_m.group(2)
+
+                filename = filename.strip()
+                if not filename:
+                    return att_m.group(0)
+
+                # 안전한 이스케이프
+                safe = _html.escape(filename, quote=True)
+                return f'<ri:attachment ri:filename="{safe}" />'
+
+            new_inner = ATT_RE.sub(_repl_att, inner)
+            # 만약 변경이 없다면 원본 반환
+            if new_inner == inner:
+                return m.group(0)
+            return open_tag + new_inner + close_tag
+
+        return IMAGE_BLOCK_RE.sub(_repl_image, html_text)

@@ -67,15 +67,62 @@ def upload_attachments(page_id, folder):
     att_path = os.path.join(folder, 'attachments')
     if not os.path.exists(att_path):
         return
+    # load manifest to map stored filenames -> original titles (if present)
+    manifest_path = os.path.join(att_path, 'manifest.json')
+    manifest = {}
+    title_map = {}
+    try:
+        if os.path.exists(manifest_path):
+            with open(manifest_path, 'r', encoding='utf-8') as mf:
+                manifest = json.load(mf)
+                title_map = manifest.get('title_map', {}) if isinstance(manifest, dict) else {}
+    except Exception:
+        title_map = {}
     for fname in os.listdir(att_path):
+        # skip manifest file and any non-files
+        if fname == 'manifest.json':
+            continue
         file_path = os.path.join(att_path, fname)
+        if not os.path.isfile(file_path):
+            continue
+        # normalize filename for comparison (macOS may use NFD on disk)
+        try:
+            import unicodedata
+            fname_norm = unicodedata.normalize('NFC', fname)
+        except Exception:
+            fname_norm = fname
         url = f"{NEW_BASE}/rest/api/content/{page_id}/child/attachment"
         try:
             with open(file_path, 'rb') as f:
-                new_session.post(url, files={'file': (fname, f)}, headers={'X-Atlassian-Token': 'no-check'})
-            logger.debug(f"첨부파일 업로드: {fname}")
+                # If we have an original title for this stored filename, upload using the original title
+                # so that page references (ri:attachment ri:filename="original.jpg") match uploaded attachments.
+                upload_name = fname
+                # reverse title_map: stored_name -> title
+                # title_map typically maps title -> stored_name; build reverse
+                try:
+                    # title_map values are stored names; find title whose value equals fname
+                    for t, stored in title_map.items():
+                        try:
+                            stored_norm = unicodedata.normalize('NFC', stored)
+                        except Exception:
+                            stored_norm = stored
+                        if stored_norm == fname_norm:
+                            upload_name = t
+                            break
+                except Exception:
+                    pass
+
+                r = new_session.post(url, files={'file': (upload_name, f)}, headers={'X-Atlassian-Token': 'no-check'})
+                try:
+                    status = getattr(r, 'status_code', None)
+                    if status and status >= 400:
+                        logger.error(f"첨부파일 업로드 응답 에러 [{upload_name}] status={status} text={r.text}")
+                    else:
+                        logger.debug(f"첨부파일 업로드: stored={fname} upload_as={upload_name} status={status}")
+                except Exception:
+                    logger.debug(f"첨부파일 업로드(응답 로그) 실패: {fname}")
         except Exception as e:
-            logger.error(f"첨부파일 업로드 실패 [{fname}]: {e}")
+             logger.error(f"첨부파일 업로드 실패 [{fname}]: {e}")
 
 
 def build_page_hierarchy(pages_dir):
@@ -191,6 +238,12 @@ def upload_page(old_id, pages_info, page_map, parent_new_id, inline_images, forc
                 html_body = Sanitizer.sanitize_code_macros(html_body)
                 html_body = Sanitizer.sanitize_gliffy_macros(html_body, att_dir)
 
+                # 안전 보완: 변환된 HTML 내부의 ri:attachment 참조 정규화
+                try:
+                    html_body = Sanitizer.normalize_ri_attachment_refs(html_body)
+                except Exception:
+                    pass
+
                 # ✨ 새로 추가: URL 이미지 변환 (보험용)
                 html_body = Sanitizer.convert_remaining_url_images(html_body, att_dir)
             except Exception as e:
@@ -211,6 +264,12 @@ def upload_page(old_id, pages_info, page_map, parent_new_id, inline_images, forc
                     html_body = Sanitizer.remove_macro_attrs(html_body)
                     html_body = Sanitizer.sanitize_code_macros(html_body)
                     html_body = Sanitizer.sanitize_gliffy_macros(html_body, att_dir)
+
+                    # 안전 보완: md->HTML 변환본도 ri:attachment 정규화
+                    try:
+                        html_body = Sanitizer.normalize_ri_attachment_refs(html_body)
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.debug(f"sanitizer 적용 실패 (md) [{meta['title']}]: {e}")
             except Exception as e:
@@ -230,7 +289,98 @@ def upload_page(old_id, pages_info, page_map, parent_new_id, inline_images, forc
 
     # 실제 내용으로 업데이트
     try:
+        # Debug: list ac:image ri:attachment filenames referenced in html_body
+        try:
+            import re
+            imgs = re.findall(r'<ac:image[^>]*>.*?<ri:attachment\s+ri:filename="([^"]+)"\s*/?>.*?</ac:image>', html_body or '', re.DOTALL | re.IGNORECASE)
+            if imgs:
+                logger.debug(f"페이지 업데이트 전에 참조되는 첨부파일 목록: {imgs}")
+            else:
+                logger.debug("페이지 업데이트 전에 참조되는 ac:image/ri:attachment 없음")
+        except Exception as _e:
+            logger.debug(f"첨부 참조 검사 실패: {_e}")
         update_page(new_id, meta['title'], html_body, parent=parent_new_id)
+
+        # Verification: check remote attachments and re-upload any missing ones referenced in html_body
+        try:
+            def _list_remote_attachments(pid):
+                url = f"{NEW_BASE}/rest/api/content/{pid}/child/attachment"
+                res = new_session.get(url, params={'limit': 200}, timeout=15)
+                res.raise_for_status()
+                data = res.json().get('results', [])
+                return set(item.get('title') for item in data if item.get('title'))
+
+            referenced = set(imgs) if 'imgs' in locals() else set()
+            remote_att = _list_remote_attachments(new_id) if referenced else set()
+            missing = referenced - remote_att
+            if missing:
+                logger.warning(f"원격에 없는 참조 첨부 발견, 재업로드 시도: {missing}")
+                # try to upload missing files from local attachments dir
+                att_path_local = att_dir
+                manifest_map = {}
+                try:
+                    mpath = os.path.join(att_path_local, 'manifest.json')
+                    if os.path.exists(mpath):
+                        manifest_map = json.load(open(mpath, 'r', encoding='utf-8')).get('title_map', {}) or {}
+                except Exception:
+                    manifest_map = {}
+
+                uploaded_any = False
+                for fname in list(missing):
+                    # find file in att_dir: exact match or NFC-normalized match or manifest mapping
+                    candidate = None
+                    # direct file
+                    p1 = os.path.join(att_path_local, fname)
+                    if os.path.exists(p1):
+                        candidate = p1
+                        upload_as = fname
+                    else:
+                        # check manifest_map keys (title->stored)
+                        stored = manifest_map.get(fname)
+                        if stored:
+                            p2 = os.path.join(att_path_local, stored)
+                            if os.path.exists(p2):
+                                candidate = p2
+                                upload_as = fname
+                        # try normalized matches
+                        if not candidate:
+                            try:
+                                import unicodedata
+                                nf = unicodedata.normalize('NFC', fname)
+                                for f in os.listdir(att_path_local):
+                                    if unicodedata.normalize('NFC', f) == nf:
+                                        candidate = os.path.join(att_path_local, f)
+                                        upload_as = fname
+                                        break
+                            except Exception:
+                                pass
+                    if candidate:
+                        try:
+                            with open(candidate, 'rb') as cf:
+                                r = new_session.post(f"{NEW_BASE}/rest/api/content/{new_id}/child/attachment", files={'file': (upload_as, cf)}, headers={'X-Atlassian-Token': 'no-check'})
+                                try:
+                                    if getattr(r, 'status_code', None) and r.status_code >= 400:
+                                        logger.error(f"재업로드 실패 [{upload_as}] status={r.status_code} text={r.text}")
+                                    else:
+                                        logger.info(f"재업로드 성공: {upload_as}")
+                                        uploaded_any = True
+                                except Exception:
+                                    logger.debug(f"재업로드 응답 로깅 실패: {upload_as}")
+                        except Exception as e:
+                            logger.error(f"재업로드 중 파일 열기 실패 [{candidate}]: {e}")
+                    else:
+                        logger.error(f"로컬 첨부에서 참조 파일 찾을 수 없음: {fname}")
+
+                if uploaded_any:
+                    # if we uploaded missing attachments, update page again to ensure links resolve
+                    try:
+                        update_page(new_id, meta['title'], html_body, parent=parent_new_id)
+                        logger.info(f"첨부 재업로드 후 페이지 재업데이트 완료: {meta['title']}")
+                    except Exception as e:
+                        logger.error(f"첨부 재업로드 후 페이지 업데이트 실패: {e}")
+        except Exception as e:
+            logger.debug(f"원격 첨부 검증 실패: {e}")
+
         if old_id not in resume_state.get('uploaded', []):
             resume_state.setdefault('uploaded', []).append(old_id)
         logger.info(f"✓ 업로드 완료: {meta['title']} (new_id={new_id})")
