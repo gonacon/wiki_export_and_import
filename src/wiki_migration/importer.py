@@ -323,6 +323,9 @@ def import_all(inline_images=False, force_update=False, root_page_id=None, targe
 
     # 페이지 계층 구조 파악
     logger.info("페이지 계층 구조 분석 중...")
+    # 안내: single-pass import는 기본적으로 순차 실행입니다.
+    logger.info("단일 패스 import 모드: 업로드는 순차적으로 실행됩니다 (병렬화하려면 2-Pass 모드를 사용하세요).")
+
     pages_info = build_page_hierarchy(pages_dir)
 
     # import할 페이지 목록 결정
@@ -396,6 +399,9 @@ def import_all_two_pass(inline_images=False, force_update=False, root_page_id=No
 
     # 페이지 계층 구조 파악
     logger.info("페이지 계층 구조 분석 중...")
+    # 안내: 병렬 처리 관련 정보 출력
+    logger.info(f"2-Pass Import 시작: MAX_WORKERS 설정 = {MAX_WORKERS}")
+
     pages_info = build_page_hierarchy(pages_dir)
 
     # import할 페이지 목록 결정
@@ -504,6 +510,7 @@ def import_all_two_pass(inline_images=False, force_update=False, root_page_id=No
         if not pids:
             continue
         workers = min(MAX_WORKERS, len(pids)) if MAX_WORKERS else min(8, len(pids))
+        logger.info(f"Pass1: depth={depth} 레벨에서 {len(pids)}개 페이지를 처리합니다. 사용 워커 수 = {workers}")
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(create_task, pid): pid for pid in pids}
             for fut in as_completed(futures):
@@ -614,6 +621,7 @@ def import_all_two_pass(inline_images=False, force_update=False, root_page_id=No
     # Run update_task in parallel for all import targets
     all_targets = [pid for pid in page_ids_to_import if pid in pages_info]
     workers = min(MAX_WORKERS, len(all_targets)) if MAX_WORKERS else min(8, len(all_targets))
+    logger.info(f"Pass2: 총 대상 페이지 수 = {len(all_targets)}, 사용 워커 수 = {workers}")
     with ThreadPoolExecutor(max_workers=workers or 1) as ex:
         futures = {ex.submit(update_task, pid): pid for pid in all_targets}
         for fut in as_completed(futures):
