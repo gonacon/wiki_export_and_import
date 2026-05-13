@@ -47,3 +47,10 @@ s
 
 737066549 신규 위키 기프티콘개발팀 pageId
 728909587 여정근 위키 pageId
+
+[//]: # (폴더 구조 변경 후 실행 방법)
+export N_USER="1004592"
+export N_PASS='비밀번호'
+source .venv/bin/activate
+export PYTHONPATH="src"
+python -u -m wiki_migration.run

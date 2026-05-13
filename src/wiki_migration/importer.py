@@ -53,11 +53,39 @@ def create_page(title, body_html, parent=None):
         logger.debug(f"기존 페이지 발견 [{title}] (ID: {existing['id']}) → 업데이트")
         return update_page(existing['id'], title, body_html, parent)
     url = f"{NEW_BASE}/rest/api/content"
-    data = {'type': 'page', 'title': title, 'space': {'key': NEW_SPACE}, 'body': {'storage': {'value': body_html, 'representation': 'storage'}}}
+    # 기본적으로 config의 NEW_SPACE를 사용하되,
+    # 부모 페이지(ID)가 주어지면 부모 페이지의 space.key를 우선 사용합니다.
+    space_key = NEW_SPACE
+    if parent:
+        try:
+            # 부모 페이지 정보를 조회하여 소속 space 키를 가져온다.
+            resp = new_session.get(f"{NEW_BASE}/rest/api/content/{parent}", params={'expand': 'space'}, timeout=10)
+            resp.raise_for_status()
+            pjson = resp.json()
+            parent_space = pjson.get('space', {}).get('key')
+            if parent_space:
+                space_key = parent_space
+        except Exception:
+            # 실패하면 기본 NEW_SPACE를 사용 (로그만 남김)
+            logger.debug(f"부모 페이지({parent})의 space 조회 실패 — NEW_SPACE 사용: {NEW_SPACE}")
+
+    data = {'type': 'page', 'title': title, 'space': {'key': space_key}, 'body': {'storage': {'value': body_html, 'representation': 'storage'}}}
     if parent:
         data['ancestors'] = [{'id': parent}]
     r = new_session.post(url, json=data)
-    resp = r.json()
+    # better diagnostics: log status and body on failure
+    status = getattr(r, 'status_code', None)
+    text = None
+    try:
+        text = r.text
+    except Exception:
+        text = None
+    if status and status >= 400:
+        raise RuntimeError(f"페이지 생성 실패: status={status} text={text}")
+    try:
+        resp = r.json()
+    except Exception:
+        raise RuntimeError(f"페이지 생성 실패: non-json response status={status} text={text}")
     if 'id' not in resp:
         raise RuntimeError(f"페이지 생성 실패: {resp}")
     return resp['id']

@@ -6,7 +6,7 @@ import requests
 # 기본 설정
 OLD_BASE = os.getenv("OLD_BASE", "https://wiki.11stcorp.com")
 NEW_BASE = os.getenv("NEW_BASE", "https://wiki.skplanet.com")
-# 사용자 pageId "728909587"
+# 사용자 pageId "750466049"
 NEW_PARENT_PAGE_ID = os.getenv("NEW_PARENT_PAGE_ID", "")
 
 OLD_USER = os.getenv("O_USER")
@@ -15,7 +15,8 @@ NEW_USER = os.getenv("N_USER")
 NEW_PASS = os.getenv("N_PASS")
 
 SPACE = os.getenv("SPACE", "GFTCDEV")
-NEW_SPACE = os.getenv("NEW_SPACE", "~1004592")
+# NEW_SPACE = os.getenv("NEW_SPACE", "~1004592")
+NEW_SPACE = os.getenv("NEW_SPACE", "GIFTICON")
 
 EXPORT_DIR = os.getenv("EXPORT_DIR", "./wiki_down_upload_export")
 FAILED_GLIFFY_LOG = os.path.join(EXPORT_DIR, "failed_gliffy.json")
@@ -28,6 +29,22 @@ RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
 # 세션
 old_session = requests.Session()
 new_session = requests.Session()
+
+# If credentials are provided via environment variables, set them as basic-auth
+# on the sessions. For Atlassian Cloud it's common to use email:APITOKEN as
+# Basic Auth. This ensures REST API calls use the same auth method.
+if NEW_USER and NEW_PASS:
+    # Set basic auth on the session (useful for Atlassian Cloud: email:APITOKEN)
+    try:
+        new_session.auth = (NEW_USER, NEW_PASS)
+    except Exception:
+        pass
+
+if OLD_USER and OLD_PASS:
+    try:
+        old_session.auth = (OLD_USER, OLD_PASS)
+    except Exception:
+        pass
 
 # 로거 설정
 
