@@ -14,6 +14,8 @@ from .importer import import_all, import_all_two_pass
 from .config import old_session, new_session
 import argparse
 import sys
+import getpass
+import json
 
 def get_user_input(prompt, default=None, required=False):
     """사용자 입력을 받는 헬퍼 함수"""
@@ -42,6 +44,92 @@ def get_yes_no(prompt, default=False):
     if not user_input:
         return default
     return user_input in ['y', 'yes', '예']
+
+
+def read_credentials_file(path):
+    """간단한 자격증명 파일을 읽음.
+    지원 형식:
+      - JSON: {"O_USER":"user","O_PASS":"pass"} 또는 {"user":"...","password":"..."}
+      - KEY=VALUE 라인 (예: O_USER=, O_PASS=)
+      - 첫 줄 사용자명, 둘째 줄 비밀번호
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except Exception as e:
+        logger.error(f"자격증명 파일 읽기 실패: {e} (path={path})")
+        return None, None
+
+    # JSON 시도
+    try:
+        data = json.loads(text)
+        # 다양한 키 이름 허용
+        user = data.get('O_USER') or data.get('OLD_USER') or data.get('user') or data.get('username')
+        pwd = data.get('O_PASS') or data.get('OLD_PASS') or data.get('password') or data.get('pwd')
+        return user, pwd
+    except Exception:
+        pass
+
+    # KEY=VALUE 형식
+    user = pwd = None
+    for line in text.splitlines():
+        if '=' in line:
+            k, v = line.split('=', 1)
+            k = k.strip(); v = v.strip()
+            if k in ('O_USER', 'OLD_USER', 'user', 'username'):
+                user = v
+            if k in ('O_PASS', 'OLD_PASS', 'password', 'pwd'):
+                pwd = v
+    if user or pwd:
+        return user, pwd
+
+    # 마지막으로 두 줄 형식
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) >= 2:
+        return lines[0].strip(), lines[1].strip()
+    return None, None
+
+
+def save_credentials_file(path, user, pwd):
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(f"O_USER={user}\nO_PASS={pwd}\n")
+        logger.info(f"자격증명 파일 저장 완료: {path}")
+    except Exception as e:
+        logger.warning(f"자격증명 파일 저장 실패: {e} (path={path})")
+
+
+def obtain_credentials(default_user, default_pass, label='OLD'):
+    """환경변수에 설정된 값이 있으면 그 값을 반환. 없으면 대화형으로 입력하거나 파일에서 로드.
+    반환: (user, pass)
+    """
+    # 이미 값이 있으면 그대로 사용
+    if default_user and default_pass:
+        return default_user, default_pass
+
+    print(f"{label} 로그인 정보가 설정되어 있지 않습니다.")
+    # 먼저 파일에서 불러오기 시도
+    if get_yes_no("자격증명 파일에서 로드하시겠습니까? (예: credentials.json 또는 .env)", default=True):
+        path = get_user_input("파일 경로를 입력하세요", default='./credentials.txt')
+        user, pwd = read_credentials_file(path)
+        if user and pwd:
+            print("파일에서 자격증명을 읽었습니다.")
+            if get_yes_no("이 자격증명을 환경변수로 저장하시겠습니까? (파일에 다시 저장됨)", default=False):
+                save_credentials_file(path, user, pwd)
+            return user, pwd
+        else:
+            print("파일에서 자격증명을 읽지 못했습니다. 수동으로 입력합니다.")
+
+    # 수동 입력
+    user = get_user_input(f"{label} 계정 사용자명 (빈칸이면 취소)", required=False)
+    if not user:
+        print("로그인 정보가 제공되지 않았습니다. 로그인을 건너뜁니다.")
+        return None, None
+    pwd = getpass.getpass(f"{label} 계정 비밀번호: ")
+    if get_yes_no("입력한 자격증명을 파일로 저장하시겠습니까?", default=False):
+        path = get_user_input("저장할 파일 경로", default='./credentials.txt')
+        save_credentials_file(path, user, pwd)
+    return user, pwd
 
 
 # run.py - interactive_mode() 함수 전체 교체
@@ -118,7 +206,7 @@ def interactive_mode():
                     default=str(recommended_workers)  # 권장값을 기본값으로
                 )
                 try:
-                    export_workers = int(workers_input)
+                    export_workers = int(str(workers_input))
                     if export_workers < 1:
                         print("워커 수는 1 이상이어야 합니다.")
                         continue
@@ -225,8 +313,10 @@ def interactive_mode():
     try:
         if mode == 'export':
             # 로그인 후 export 실행
+            # 로그인 정보 확보: 환경변수값이 없으면 파일 또는 입력으로 받아옴
+            user, pwd = obtain_credentials(OLD_USER, OLD_PASS, label='OLD')
             try:
-                login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
+                login(old_session, OLD_BASE, user, pwd)
             except Exception as e:
                 logger.error(f"로그인 실패로 export 중단: {e}")
                 print(f"로그인 실패: {e}")
@@ -238,8 +328,9 @@ def interactive_mode():
 
         elif mode == 'import':
             # 로그인 후 import 실행
+            user, pwd = obtain_credentials(NEW_USER, NEW_PASS, label='NEW')
             try:
-                login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+                login(new_session, NEW_BASE, user, pwd)
             except Exception as e:
                 logger.error(f"로그인 실패로 import 중단: {e}")
                 print(f"로그인 실패: {e}")
@@ -266,8 +357,9 @@ def interactive_mode():
             logger.info("=" * 60)
             logger.info("STEP 1: Export 시작")
             logger.info("=" * 60)
+            user, pwd = obtain_credentials(OLD_USER, OLD_PASS, label='OLD')
             try:
-                login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
+                login(old_session, OLD_BASE, user, pwd)
             except Exception as e:
                 logger.error(f"로그인 실패로 export 중단: {e}")
                 print(f"로그인 실패: {e}")
@@ -282,8 +374,9 @@ def interactive_mode():
             logger.info("=" * 60)
             logger.info("STEP 2: Import 시작")
             logger.info("=" * 60)
+            user, pwd = obtain_credentials(NEW_USER, NEW_PASS, label='NEW')
             try:
-                login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+                login(new_session, NEW_BASE, user, pwd)
             except Exception as e:
                 logger.error(f"로그인 실패로 import 중단: {e}")
                 print(f"로그인 실패: {e}")
@@ -366,12 +459,23 @@ def main():
     elif args.mode:
         # 명령줄 모드
         if args.mode == 'export':
+            # CLI 모드: non-interactive이면 환경변수에 의존, 아니면 부족한 정보는 프롬프트로 수집
+            if args.non_interactive:
+                user, pwd = OLD_USER, OLD_PASS
+                if not user or not pwd:
+                    logger.error("비대화형 모드인데 OLD_USER/O_PASS가 설정되어 있지 않습니다.")
+                    print("비대화형 모드에서는 O_USER/O_PASS 환경변수를 설정해야 합니다.")
+                    sys.exit(1)
+            else:
+                user, pwd = (OLD_USER, OLD_PASS) if (OLD_USER and OLD_PASS) else obtain_credentials(OLD_USER, OLD_PASS, label='OLD')
+
             try:
-                login(old_session, OLD_BASE, OLD_USER, OLD_PASS)
+                login(old_session, OLD_BASE, user, pwd)
             except Exception as e:
                 logger.error(f"로그인 실패로 export 중단: {e}")
                 print(f"로그인 실패: {e}")
                 sys.exit(1)
+
             export_all(old_session, OLD_BASE, SPACE,
                        root_page_id=args.page_id,
                        inline_images=args.inline_images,
@@ -380,8 +484,17 @@ def main():
         elif args.mode == 'import' or args.mode == 'import2':
             # import2 또는 --two-pass 플래그가 있으면 2-Pass Import
             # 로그인
+            if args.non_interactive:
+                user, pwd = NEW_USER, NEW_PASS
+                if not user or not pwd:
+                    logger.error("비대화형 모드인데 N_USER/N_PASS가 설정되어 있지 않습니다.")
+                    print("비대화형 모드에서는 N_USER/N_PASS 환경변수를 설정해야 합니다.")
+                    sys.exit(1)
+            else:
+                user, pwd = (NEW_USER, NEW_PASS) if (NEW_USER and NEW_PASS) else obtain_credentials(NEW_USER, NEW_PASS, label='NEW')
+
             try:
-                login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+                login(new_session, NEW_BASE, user, pwd)
             except Exception as e:
                 logger.error(f"로그인 실패로 import 중단: {e}")
                 print(f"로그인 실패: {e}")
@@ -411,8 +524,17 @@ def main():
                        workers=args.workers)
 
             # migrate도 2-Pass 옵션 지원
+            if args.non_interactive:
+                user, pwd = NEW_USER, NEW_PASS
+                if not user or not pwd:
+                    logger.error("비대화형 모드인데 N_USER/N_PASS가 설정되어 있지 않습니다.")
+                    print("비대화형 모드에서는 N_USER/N_PASS 환경변수를 설정해야 합니다.")
+                    sys.exit(1)
+            else:
+                user, pwd = (NEW_USER, NEW_PASS) if (NEW_USER and NEW_PASS) else obtain_credentials(NEW_USER, NEW_PASS, label='NEW')
+
             try:
-                login(new_session, NEW_BASE, NEW_USER, NEW_PASS)
+                login(new_session, NEW_BASE, user, pwd)
             except Exception as e:
                 logger.error(f"로그인 실패로 import 중단: {e}")
                 print(f"로그인 실패: {e}")

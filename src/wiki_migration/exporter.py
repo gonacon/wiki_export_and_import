@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import datetime
 from tqdm import tqdm
-from .config import old_session, EXPORT_DIR, MAX_WORKERS
+from .config import old_session, EXPORT_DIR, MAX_WORKERS, REQUEST_TIMEOUT
 import traceback
 from .utils import (
     safe_folder_name,
@@ -66,11 +66,19 @@ def get_all_pages(old_session, old_base, space, root_page_id=None):
     while True:
         url = f"{old_base}/rest/api/content"
         params = {"spaceKey": space, "limit": limit, "start": start, "expand": "body.storage,ancestors"}
-        r = old_session.get(url, params=params)
+        logger.info(f"페이지 목록 조회 중: start={start}, limit={limit}")
+        r = old_session.get(url, params=params, timeout=REQUEST_TIMEOUT)
         try:
             r.raise_for_status() # 4xx or 5xx 응답에 대해 예외 발생
         except Exception as e:
-            logger.error(f"페이지 목록 수집 실패: {e} (url={url}, params={params})")
+            # 응답 객체 정보(상태코드, 본문 일부)를 함께 로깅하여 원인 파악에 도움을 줌
+            try:
+                status = r.status_code
+                body_preview = (r.text[:500] + '...') if len(r.text) > 500 else r.text
+            except Exception:
+                status = None
+                body_preview = '<no response body>'
+            logger.error(f"페이지 목록 수집 실패: {e} (url={url}, params={params}, status={status}, body={body_preview})")
             raise
         data = r.json()
         results = data.get('results', [])
@@ -85,11 +93,18 @@ def get_all_pages(old_session, old_base, space, root_page_id=None):
 def get_descendant_pages(old_session, old_base, root_page_id):
     pages = []
     url = f"{old_base}/rest/api/content/{root_page_id}"
-    r = old_session.get(url, params={"expand": "body.storage,ancestors"})
+    logger.info(f"루트 페이지 조회 시작: root={root_page_id}")
+    r = old_session.get(url, params={"expand": "body.storage,ancestors"}, timeout=REQUEST_TIMEOUT)
     try:
         r.raise_for_status()
     except Exception as e:
-        logger.error(f"루트 페이지 조회 실패 (root={root_page_id}): {e} (url={url})")
+        try:
+            status = r.status_code
+            body_preview = (r.text[:500] + '...') if len(r.text) > 500 else r.text
+        except Exception:
+            status = None
+            body_preview = '<no response body>'
+        logger.error(f"루트 페이지 조회 실패 (root={root_page_id}): {e} (url={url}, status={status}, body={body_preview})")
         raise
     root = r.json()
     pages.append(root)
@@ -99,7 +114,9 @@ def get_descendant_pages(old_session, old_base, root_page_id):
         while True:
             url = f"{old_base}/rest/api/content/{page_id}/child/page"
             params = {"limit": limit, "start": start, "expand": "body.storage,ancestors"}
-            r = old_session.get(url, params=params)
+            logger.info(f"하위 페이지 조회 중: parent={page_id}, start={start}, limit={limit}")
+            r = old_session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
             results = r.json().get('results', [])
             if not results:
                 break
@@ -247,6 +264,19 @@ def export_all(old_session, old_base, space, root_page_id=None, inline_images=Fa
                     logger.info(f"메타데이터 파일 백업 완료: {fname}")
                 except Exception as e:
                     logger.warning(f"메타데이터 파일 백업 실패({src}): {e}")
+
+        # NOTE:
+        # 기존 migrate.log 파일을 이동하면 파일 핸들(로그 파일 디스크립터)이
+        # 여전히 열려 있어 이후 로그가 이동된(backup) 파일로 계속 기록될 수 있습니다.
+        # 따라서 백업 완료 후 로거의 FileHandler를 재초기화하여
+        # 새로 생성될 `EXPORT_DIR/migrate.log`로 로그가 남도록 합니다.
+        try:
+            from . import config as _config
+            _config.setup_logger()
+            logger.info('로거 핸들러 재초기화 완료: 새 migrate.log로 기록됩니다')
+        except Exception:
+            # 실패해도 진행: 기존 로거 핸들러가 남아있을 수 있으므로 경고만 남깁니다.
+            logger.warning('로거 핸들러 재초기화에 실패했습니다 (계속 진행)')
 
     ensure_export_pages_dir()
     resume_state = load_resume_state()

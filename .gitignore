@@ -11,8 +11,13 @@ __pycache__/
 *.env
 .env
 wiki_down_upload_export/
+wiki_GIFTICONAF/
+wiki_Gifticonteam
 node_modules/
 *.sqlite3
+
+credentials.txt
+
 # macOS
 .Trashes
 

@@ -4,7 +4,7 @@ import time
 import re
 import logging
 import hashlib
-from .config import EXPORT_DIR, OLD_BASE, old_session, MAX_RETRIES, RETRY_DELAY, FAILED_GLIFFY_LOG, MAX_WORKERS
+from .config import EXPORT_DIR, OLD_BASE, old_session, MAX_RETRIES, RETRY_DELAY, FAILED_GLIFFY_LOG, MAX_WORKERS, REQUEST_TIMEOUT
 from .utils import safe_folder_name
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -138,7 +138,8 @@ def _write_bytes_unique(save_dir, filename, content_bytes, unique_key=None):
 
 def download_attachments_for_page(page, folder):
     url = f"{OLD_BASE}/rest/api/content/{page['id']}/child/attachment"
-    r = old_session.get(url)
+    r = old_session.get(url, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
     results = r.json().get('results', [])
     att_dir = os.path.join(folder, "attachments")
     os.makedirs(att_dir, exist_ok=True)
@@ -151,7 +152,8 @@ def download_attachments_for_page(page, folder):
             if manifest.get(link):
                 logger.debug(f"manifest에 이미 있음, skip: {link} -> {manifest.get(link)}")
                 continue
-            resp = old_session.get(link)
+            resp = old_session.get(link, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
             content = resp.content
             saved_name = _write_bytes_unique(att_dir, name, content, unique_key=link)
             manifest[link] = saved_name
