@@ -22,7 +22,6 @@ Confluence 위키 마이그레이션 및 스크립트 저장소.
 
 ```bash
 source .venv/bin/activate
-cd /path/to/wiki_export_and_import
 python3 -m src.wiki_migration.run
 ```
 

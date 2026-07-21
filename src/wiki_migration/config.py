@@ -3,7 +3,42 @@ import logging
 import sys
 import requests
 
+def _load_env_file():
+    """Load .env file into os.environ if available."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        return
+    except ImportError:
+        pass
+
+    # Fallback .env loader
+    env_paths = [
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env"),
+    ]
+    for env_path in env_paths:
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if "=" in line:
+                            key, value = line.split("=", 1)
+                            key = key.strip()
+                            value = value.strip().strip("'\"")
+                            if key and key not in os.environ:
+                                os.environ[key] = value
+                break
+            except Exception:
+                pass
+
+_load_env_file()
+
 # 기본 설정
+
 OLD_BASE = os.getenv("OLD_BASE", "https://wiki.11stcorp.com")
 NEW_BASE = os.getenv("NEW_BASE", "https://wiki.skplanet.com")
 # 사용자 pageId "728909587"
@@ -17,7 +52,8 @@ NEW_PASS = os.getenv("N_PASS")
 SPACE = os.getenv("SPACE", "GFTCDEV")
 # SPACE = os.getenv("SPACE", "Gifticonteam")
 # SPACE = os.getenv("SPACE", "GIFTICONAF")
-NEW_SPACE = os.getenv("NEW_SPACE", "~1004592")
+# NEW_SPACE = os.getenv("NEW_SPACE", "~1004592")
+NEW_SPACE = os.getenv("NEW_SPACE", "GICON")
 # NEW_SPACE = os.getenv("NEW_SPACE", "GIFTICON")
 
 EXPORT_DIR = os.getenv("EXPORT_DIR", "./wiki_down_upload_export")

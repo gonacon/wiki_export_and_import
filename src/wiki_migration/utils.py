@@ -63,7 +63,8 @@ def html_to_markdown(html_text):
 def convert_local_imgs_to_acimage(html_text):
     """로컬/상대 이미지 참조를 Confluence storage attachment 매크로로 변환."""
     def to_acimage(filename):
-        safe_name = html.escape(filename, quote=True)
+        filename_nfc = unicodedata.normalize('NFC', filename)
+        safe_name = html.escape(filename_nfc, quote=True)
         return f'<ac:image><ri:attachment ri:filename="{safe_name}" /></ac:image>'
 
     md_pattern = re.compile(r'!\[(.*?)\]\(([^)]+)\)')
@@ -95,7 +96,8 @@ def convert_local_imgs_to_acimage(html_text):
 
 def convert_data_uri_imgs_to_acimage(html_text, attachments_dir):
     def to_acimage(filename):
-        safe_name = html.escape(filename, quote=True)
+        filename_nfc = unicodedata.normalize('NFC', filename)
+        safe_name = html.escape(filename_nfc, quote=True)
         return f'<ac:image><ri:attachment ri:filename="{safe_name}" /></ac:image>'
 
     img_tag_pattern = re.compile(r'<img\b[^>]*>', re.IGNORECASE)

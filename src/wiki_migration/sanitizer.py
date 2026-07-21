@@ -186,8 +186,9 @@ class Sanitizer:
                 matched_file = _find_matching_image(attachments_dir, display_name, mid)
                 
                 if matched_file:
-                    logger.info(f"Gliffy 매크로 → 이미지 변환: {display} → {matched_file}")
-                    return f'<ac:image><ri:attachment ri:filename="{html.escape(matched_file)}" /></ac:image>'
+                    matched_file_nfc = unicodedata.normalize('NFC', matched_file)
+                    logger.info(f"Gliffy 매크로 → 이미지 변환: {display} → {matched_file_nfc}")
+                    return f'<ac:image><ri:attachment ri:filename="{html.escape(matched_file_nfc)}" /></ac:image>'
 
             logger.warning(f"Gliffy 매크로 변환 실패 (첨부파일 없음): {display}")
             return (
@@ -200,6 +201,26 @@ class Sanitizer:
             )
 
         return GLIFFY_RE.sub(_repl, html_text)
+
+    @staticmethod
+    def normalize_ri_attachment_filenames(html_text):
+        """
+        HTML 본문 내의 모든 <ri:attachment> 태그의 ri:filename 속성을
+        Mac NFD(조합형)에서 NFC(완성형) 유니코드로 정규화합니다.
+        """
+        if not html_text:
+            return html_text
+
+        FN_RE = re.compile(r'(ri:filename\s*=\s*)(?:"([^"]+)"|\'([^\']+)\')', re.IGNORECASE)
+
+        def _repl(m):
+            prefix = m.group(1)
+            filename = m.group(2) if m.group(2) is not None else m.group(3)
+            normalized_fn = unicodedata.normalize('NFC', filename)
+            safe_fn = html.escape(normalized_fn, quote=True)
+            return f'{prefix}"{safe_fn}"'
+
+        return FN_RE.sub(_repl, html_text)
 
     @staticmethod
     def convert_remaining_url_images(html_text, attachments_dir=None):
@@ -234,6 +255,8 @@ class Sanitizer:
                     logger.warning(f"파일명 추출 실패, 원본 유지: {url}")
                     return full_block
 
+                filename = unicodedata.normalize('NFC', filename)
+
                 # 첨부파일 존재 여부 확인
                 if attachments_dir and os.path.isdir(attachments_dir):
                     file_path = os.path.join(attachments_dir, filename)
@@ -244,9 +267,10 @@ class Sanitizer:
                 # ac:alt 추출
                 alt_match = re.search(r'ac:alt="([^"]*)"', full_block)
                 alt_text = alt_match.group(1) if alt_match else filename
+                alt_text = unicodedata.normalize('NFC', alt_text)
 
                 # 변환
-                new_block = f'<ac:image ac:alt="{alt_text}"><ri:attachment ri:filename="{filename}" /></ac:image>'
+                new_block = f'<ac:image ac:alt="{html.escape(alt_text)}"><ri:attachment ri:filename="{html.escape(filename)}" /></ac:image>'
                 logger.info(f"URL 이미지를 attachment로 변환: {filename}")
                 return new_block
 
@@ -302,6 +326,7 @@ class Sanitizer:
                 if not filename:
                     return att_m.group(0)
 
+                filename = unicodedata.normalize('NFC', filename)
                 # 안전한 이스케이프
                 safe = _html.escape(filename, quote=True)
                 return f'<ri:attachment ri:filename="{safe}" />'

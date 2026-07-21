@@ -269,6 +269,7 @@ def upload_page(old_id, pages_info, page_map, parent_new_id, inline_images, forc
                 # 안전 보완: 변환된 HTML 내부의 ri:attachment 참조 정규화
                 try:
                     html_body = Sanitizer.normalize_ri_attachment_refs(html_body)
+                    html_body = Sanitizer.normalize_ri_attachment_filenames(html_body)
                 except Exception:
                     pass
 
@@ -296,6 +297,7 @@ def upload_page(old_id, pages_info, page_map, parent_new_id, inline_images, forc
                     # 안전 보완: md->HTML 변환본도 ri:attachment 정규화
                     try:
                         html_body = Sanitizer.normalize_ri_attachment_refs(html_body)
+                        html_body = Sanitizer.normalize_ri_attachment_filenames(html_body)
                     except Exception:
                         pass
                 except Exception as e:
@@ -314,6 +316,7 @@ def upload_page(old_id, pages_info, page_map, parent_new_id, inline_images, forc
     # data-uri 및 로컬 이미지 치환
     html_body = convert_data_uri_imgs_to_acimage(html_body, att_dir)
     html_body = convert_local_imgs_to_acimage(html_body)
+    html_body = Sanitizer.normalize_ri_attachment_filenames(html_body)
 
     # 실제 내용으로 업데이트
     try:
@@ -763,6 +766,7 @@ def import_all_two_pass(inline_images=False, force_update=False, root_page_id=No
                         pages_info=pages_info,
                         current_page_old_id=old_id
                     )
+                    html_body = Sanitizer.normalize_ri_attachment_filenames(html_body)
                 except Exception as e:
                     logger.debug(f"Pass2 sanitizer 실패 [{meta['title']}]: {e}")
 
@@ -772,6 +776,7 @@ def import_all_two_pass(inline_images=False, force_update=False, root_page_id=No
             # data-uri 및 로컬 이미지 치환
             html_body = convert_data_uri_imgs_to_acimage(html_body, att_dir)
             html_body = convert_local_imgs_to_acimage(html_body)
+            html_body = Sanitizer.normalize_ri_attachment_filenames(html_body)
 
             # determine parent_new_id
             parent_new_id = None

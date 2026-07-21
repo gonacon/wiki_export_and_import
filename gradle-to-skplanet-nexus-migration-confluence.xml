@@ -1,0 +1,405 @@
+<!-- ============================================================
+     Confluence Storage Format
+     사용법: Confluence 페이지 편집 → 삽입(Insert) → 마크업(Markup)
+             → "Confluence 스토리지 형식(Storage Format)" 선택
+             → 아래 내용 전체 붙여넣기 → 저장
+     ============================================================ -->
+
+<ac:structured-macro ac:name="info" ac:schema-version="1">
+  <ac:parameter ac:name="title">목적</ac:parameter>
+  <ac:rich-text-body>
+    <p>11번가(이하 A사) Nexus에 보관된 Gradle 의존성 라이브러리를 로컬에 내려받아,
+    SKPlanet(이하 B사) Nexus(<code>team-gifticon-releases</code>)로
+    안전하게 업로드하는 절차를 정리합니다.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<!-- 목차 자동 생성 -->
+<ac:structured-macro ac:name="toc" ac:schema-version="1">
+  <ac:parameter ac:name="minLevel">1</ac:parameter>
+  <ac:parameter ac:name="maxLevel">2</ac:parameter>
+  <ac:parameter ac:name="style">disc</ac:parameter>
+  <ac:parameter ac:name="printable">true</ac:parameter>
+</ac:structured-macro>
+
+<hr />
+
+<!-- ──────────────────────────────────────────── -->
+<h1>1. 사전 체크리스트</h1>
+
+<ac:task-list>
+  <ac:task>
+    <ac:task-status>incomplete</ac:task-status>
+    <ac:task-body>A사(11번가) VPN에 접속 가능한 상태</ac:task-body>
+  </ac:task>
+  <ac:task>
+    <ac:task-status>incomplete</ac:task-status>
+    <ac:task-body>프로젝트 루트에서 <code>./gradlew build</code> 실행 가능</ac:task-body>
+  </ac:task>
+  <ac:task>
+    <ac:task-status>incomplete</ac:task-status>
+    <ac:task-body>B사(SKPlanet) VPN 계정 및 Nexus 업로드 권한 확보</ac:task-body>
+  </ac:task>
+  <ac:task>
+    <ac:task-status>incomplete</ac:task-status>
+    <ac:task-body>업로드 스크립트 실행 전 <code>NEXUS_USER</code> / <code>NEXUS_PASS</code> 환경변수 설정 (하드코딩 금지)</ac:task-body>
+  </ac:task>
+</ac:task-list>
+
+<hr />
+
+<!-- ──────────────────────────────────────────── -->
+<h1>2. 전체 흐름</h1>
+
+<table>
+  <tbody>
+    <tr>
+      <td style="background-color:#ddf4ff;border:2px solid #0969da;border-radius:4px;text-align:center;font-weight:bold;padding:10px 16px;color:#0550ae;">
+        A사(11번가)<br />VPN 연결
+      </td>
+      <td style="border:none;text-align:center;font-size:20px;padding:0 8px;">→</td>
+      <td style="background-color:#ddf4ff;border:2px solid #0969da;border-radius:4px;text-align:center;font-weight:bold;padding:10px 16px;color:#0550ae;">
+        라이브러리<br />다운로드 (빌드)
+      </td>
+      <td style="border:none;text-align:center;font-size:20px;padding:0 8px;">→</td>
+      <td style="background-color:#fff8c5;border:2px solid #bf8700;border-radius:4px;text-align:center;font-weight:bold;padding:10px 16px;color:#7d4e00;">
+        VPN 전환
+      </td>
+      <td style="border:none;text-align:center;font-size:20px;padding:0 8px;">→</td>
+      <td style="background-color:#ddf4ff;border:2px solid #0969da;border-radius:4px;text-align:center;font-weight:bold;padding:10px 16px;color:#0550ae;">
+        B사(SKPlanet)<br />VPN 연결
+      </td>
+      <td style="border:none;text-align:center;font-size:20px;padding:0 8px;">→</td>
+      <td style="background-color:#ddf4ff;border:2px solid #0969da;border-radius:4px;text-align:center;font-weight:bold;padding:10px 16px;color:#0550ae;">
+        Nexus 업로드
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+<hr />
+
+<!-- ──────────────────────────────────────────── -->
+<h1>3. Step 1 — 라이브러리 다운로드 (A사 VPN)</h1>
+
+<ac:structured-macro ac:name="warning" ac:schema-version="1">
+  <ac:parameter ac:name="title">⚠️ 전역 Gradle 캐시를 직접 삭제하지 마세요</ac:parameter>
+  <ac:rich-text-body>
+    <p><code>~/.gradle/caches</code>를 삭제하면 현재 프로젝트 외 다른 프로젝트 빌드에도 영향을 줍니다.
+    <strong>임시 Gradle 홈</strong> 디렉토리를 지정해 이번 프로젝트에 필요한 의존성만 깨끗하게 수집하세요.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:parameter ac:name="title">임시 Gradle 홈으로 빌드</ac:parameter>
+  <ac:parameter ac:name="linenumbers">false</ac:parameter>
+  <ac:plain-text-body><![CDATA[# 1) 임시 Gradle 홈 생성
+mkdir -p /tmp/gradle-temp
+
+# 2) 임시 홈을 사용해 빌드 실행 (전역 캐시와 완전히 분리)
+GRADLE_USER_HOME=/tmp/gradle-temp ./gradlew build --no-daemon]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<p>빌드 완료 후 <code>/tmp/gradle-temp/caches/modules-2/files-2.1/</code> 아래에
+이번 빌드에 필요한 <code>.jar</code> / <code>.pom</code> 파일만 저장됩니다.</p>
+
+<h2>Gradle 캐시 폴더 구조 예시</h2>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">none</ac:parameter>
+  <ac:plain-text-body><![CDATA[/tmp/gradle-temp/caches/modules-2/files-2.1/
+├── com.gifticon/
+│   └── gifticon-send-email/
+│       └── 1.0.2/
+│           ├── <hash>/gifticon-send-email-1.0.2.jar   ✅
+│           └── <hash>/gifticon-send-email-1.0.2.pom   ✅
+└── org.springframework.boot/
+    └── spring-boot-starter-web/
+        └── 2.7.18/
+            ├── <hash>/spring-boot-starter-web-2.7.18.jar   ✅
+            └── <hash>/spring-boot-starter-web-2.7.18.pom   ✅]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>수집된 파일 수 확인</h2>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:plain-text-body><![CDATA[find /tmp/gradle-temp/caches/modules-2/files-2.1/ -name "*.jar" | wc -l
+find /tmp/gradle-temp/caches/modules-2/files-2.1/ -name "*.pom" | wc -l]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<!-- ──────────────────────────────────────────── -->
+<h1>4. Step 2 — 로컬 폴더로 복사</h1>
+
+<p>업로드에 사용할 단일 폴더(<code>/tmp/local-repo</code>)로 모든 <code>.jar</code> / <code>.pom</code> 파일을 복사합니다.</p>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:parameter ac:name="title">파일 복사</ac:parameter>
+  <ac:plain-text-body><![CDATA[mkdir -p /tmp/local-repo
+
+find /tmp/gradle-temp/caches/modules-2/files-2.1/ \
+  \( -name "*.jar" -o -name "*.pom" \) \
+  | xargs -I{} cp {} /tmp/local-repo/
+
+# 복사 후 파일 수 확인
+ls /tmp/local-repo | wc -l]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="tip" ac:schema-version="1">
+  <ac:parameter ac:name="title">💡 임시 디렉토리 정리 (선택)</ac:parameter>
+  <ac:rich-text-body>
+    <p>복사가 끝나면 임시 Gradle 홈을 삭제해도 됩니다.</p>
+    <ac:structured-macro ac:name="code" ac:schema-version="1">
+      <ac:parameter ac:name="language">bash</ac:parameter>
+      <ac:plain-text-body><![CDATA[rm -rf /tmp/gradle-temp]]></ac:plain-text-body>
+    </ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<!-- ──────────────────────────────────────────── -->
+<h1>5. Step 3 — B사 Nexus에 업로드 (B사 VPN)</h1>
+
+<p><strong>B사 VPN으로 전환한 뒤</strong> 아래 절차를 진행합니다.</p>
+
+<h2>환경변수 설정 (필수)</h2>
+
+<ac:structured-macro ac:name="warning" ac:schema-version="1">
+  <ac:parameter ac:name="title">🔒 보안 주의</ac:parameter>
+  <ac:rich-text-body>
+    <p>계정 정보를 스크립트 파일에 직접 작성하지 마세요. Git에 커밋될 경우 보안 사고로 이어질 수 있습니다.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:plain-text-body><![CDATA[export NEXUS_USER=your_id
+export NEXUS_PASS=your_password]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>업로드 스크립트 (upload-to-nexus.sh)</h2>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:parameter ac:name="title">upload-to-nexus.sh</ac:parameter>
+  <ac:parameter ac:name="linenumbers">true</ac:parameter>
+  <ac:plain-text-body><![CDATA[#!/usr/bin/env bash
+# =====================================================
+#  SKPlanet Nexus 3 라이브러리 업로드 스크립트
+#  대상: http://nexus.skplanet.com/repository/team-gifticon-releases/
+#  사용법: bash upload-to-nexus.sh [local-repo 경로]
+# =====================================================
+
+NEXUS_HOST="http://nexus.skplanet.com"
+REPO_NAME="team-gifticon-releases"
+LOCAL_REPO="${1:-./local-repo}"   # 인자로 폴더 경로 지정 가능, 기본값: ./local-repo
+
+SUCCESS_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+
+# 환경변수 확인
+if [ -z "$NEXUS_USER" ] || [ -z "$NEXUS_PASS" ]; then
+  echo "[ERROR] NEXUS_USER 또는 NEXUS_PASS 환경변수가 설정되어 있지 않습니다."
+  echo "  export NEXUS_USER=your_id"
+  echo "  export NEXUS_PASS=your_password"
+  exit 1
+fi
+
+# 업로드 대상 폴더 확인
+if [ ! -d "$LOCAL_REPO" ]; then
+  echo "[ERROR] 업로드 대상 폴더를 찾을 수 없습니다: $LOCAL_REPO"
+  exit 1
+fi
+
+echo ""
+echo "====================================================="
+echo " Nexus 업로드 시작"
+echo " 대상 레포: $NEXUS_HOST/repository/$REPO_NAME"
+echo " 로컬 폴더: $LOCAL_REPO"
+echo "====================================================="
+echo ""
+
+while IFS= read -r -d '' JAR_FILE; do
+  FILENAME=$(basename "$JAR_FILE")
+
+  # -sources.jar / -javadoc.jar 제외
+  if echo "$FILENAME" | grep -qiE '\-(sources|javadoc)\.jar$'; then
+    echo "[SKIP]   $FILENAME  (sources/javadoc)"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    continue
+  fi
+
+  POM_FILE="${JAR_FILE%.jar}.pom"
+  if [ ! -f "$POM_FILE" ]; then
+    echo "[WARN]   $FILENAME  (pom 파일 없음, 스킵)"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    continue
+  fi
+
+  # pom에서 groupId / artifactId / version 추출
+  GROUP_ID=$(grep -m1 '<groupId>'    "$POM_FILE" | sed 's/.*<groupId>\(.*\)<\/groupId>.*/\1/' | tr -d '[:space:]')
+  ARTIFACT_ID=$(grep -m1 '<artifactId>' "$POM_FILE" | sed 's/.*<artifactId>\(.*\)<\/artifactId>.*/\1/' | tr -d '[:space:]')
+  VERSION=$(grep -m1 '<version>'    "$POM_FILE" | sed 's/.*<version>\(.*\)<\/version>.*/\1/' | tr -d '[:space:]')
+
+  if [ -z "$GROUP_ID" ] || [ -z "$ARTIFACT_ID" ] || [ -z "$VERSION" ]; then
+    echo "[WARN]   $FILENAME  (groupId/artifactId/version 파싱 실패, 스킵)"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    continue
+  fi
+
+  echo "[UPLOAD] $FILENAME  →  $GROUP_ID:$ARTIFACT_ID:$VERSION"
+
+  HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    -u "$NEXUS_USER:$NEXUS_PASS" \
+    -X POST \
+    -H "Expect:" \
+    "$NEXUS_HOST/service/rest/v1/components?repository=$REPO_NAME" \
+    -F "maven2.groupId=$GROUP_ID" \
+    -F "maven2.artifactId=$ARTIFACT_ID" \
+    -F "maven2.version=$VERSION" \
+    -F "maven2.generate-pom=false" \
+    -F "maven2.asset1=@$POM_FILE;type=application/xml" \
+    -F "maven2.asset1.extension=pom" \
+    -F "maven2.asset2=@$JAR_FILE;type=application/java-archive" \
+    -F "maven2.asset2.extension=jar")
+
+  if   [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 201 ] || [ "$HTTP_STATUS" -eq 204 ]; then
+    echo "[OK]     $FILENAME  (HTTP $HTTP_STATUS)"
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+  elif [ "$HTTP_STATUS" -eq 400 ]; then
+    echo "[SKIP]   $FILENAME  (HTTP 400 — 이미 존재하거나 정책 차단)"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+  elif [ "$HTTP_STATUS" -eq 401 ]; then
+    echo "[ERROR]  인증 실패 (HTTP 401) — NEXUS_USER / NEXUS_PASS 확인 필요"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  elif [ "$HTTP_STATUS" -eq 403 ]; then
+    echo "[ERROR]  권한 없음 (HTTP 403) — 업로드 권한 확인 필요"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  else
+    echo "[FAIL]   $FILENAME  (HTTP $HTTP_STATUS)"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+
+done < <(find "$LOCAL_REPO" -name "*.jar" -print0)
+
+echo ""
+echo "====================================================="
+echo " 업로드 완료"
+echo " 성공: $SUCCESS_COUNT  /  실패: $FAIL_COUNT  /  스킵: $SKIP_COUNT"
+echo "====================================================="
+echo ""
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+  echo "[주의] 실패한 항목이 있습니다. 위 로그를 확인하세요."
+  exit 1
+fi
+
+exit 0]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<h2>스크립트 실행</h2>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:plain-text-body><![CDATA[chmod +x upload-to-nexus.sh
+
+# local-repo 경로를 인자로 지정 (기본값: ./local-repo)
+bash upload-to-nexus.sh /tmp/local-repo]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<!-- ──────────────────────────────────────────── -->
+<h1>6. 검증 및 주의사항</h1>
+
+<h2>HTTP 상태 코드별 의미</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>HTTP 상태</th>
+      <th>의미</th>
+      <th>조치</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>200 / 201 / 204</code></td>
+      <td>✅ 업로드 성공</td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><code>400</code></td>
+      <td>이미 존재하거나 정책 차단</td>
+      <td>스킵 처리, 필요 시 수동 확인</td>
+    </tr>
+    <tr>
+      <td><code>401</code></td>
+      <td>❌ 인증 실패</td>
+      <td><code>NEXUS_USER</code> / <code>NEXUS_PASS</code> 재확인</td>
+    </tr>
+    <tr>
+      <td><code>403</code></td>
+      <td>❌ 권한 없음</td>
+      <td>Nexus 업로드 권한 요청</td>
+    </tr>
+    <tr>
+      <td>기타</td>
+      <td>네트워크 오류 등</td>
+      <td>VPN 연결 상태 및 Nexus 서버 상태 확인</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>추가 주의사항</h2>
+
+<ac:structured-macro ac:name="note" ac:schema-version="1">
+  <ac:parameter ac:name="title">POM 파싱 한계</ac:parameter>
+  <ac:rich-text-body>
+    <p>부모 POM이나 <code>&lt;properties&gt;</code>로 버전을 관리하는 경우, 스크립트의 단순 <code>grep</code> 파싱으로
+    버전을 가져오지 못할 수 있습니다. 해당 아티팩트는 <strong>수동 업로드</strong>를 권장합니다.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<ul>
+  <li><strong>대량 업로드:</strong> Nexus 서버 부하를 고려해 필요 시 <code>sleep</code> 또는 병렬 업로드 제어를 추가하세요.</li>
+  <li><strong>중복 업로드:</strong> 동일 버전이 이미 존재하면 HTTP 400이 반환되며 스킵 처리됩니다. 재실행해도 안전합니다.</li>
+  <li><strong><code>--refresh-dependencies</code>:</strong> 전역 캐시를 갱신할 뿐, 삭제하지 않습니다. 이번 목적에는 임시 <code>GRADLE_USER_HOME</code> 사용이 가장 안전합니다.</li>
+</ul>
+
+<hr />
+
+<!-- ──────────────────────────────────────────── -->
+<h1>7. 전체 명령어 요약 (Quick Reference)</h1>
+
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+  <ac:parameter ac:name="language">bash</ac:parameter>
+  <ac:parameter ac:name="title">Quick Reference — 전체 명령어 한눈에 보기</ac:parameter>
+  <ac:parameter ac:name="linenumbers">false</ac:parameter>
+  <ac:plain-text-body><![CDATA[# ── A사(11번가) VPN 환경 ───────────────────────────────────
+mkdir -p /tmp/gradle-temp
+GRADLE_USER_HOME=/tmp/gradle-temp ./gradlew build --no-daemon
+
+mkdir -p /tmp/local-repo
+find /tmp/gradle-temp/caches/modules-2/files-2.1/ \
+  \( -name "*.jar" -o -name "*.pom" \) \
+  | xargs -I{} cp {} /tmp/local-repo/
+
+rm -rf /tmp/gradle-temp          # (선택) 임시 홈 삭제
+
+# ── B사(SKPlanet) VPN으로 전환 후 ─────────────────────────
+export NEXUS_USER=your_id
+export NEXUS_PASS=your_password
+bash upload-to-nexus.sh /tmp/local-repo]]></ac:plain-text-body>
+</ac:structured-macro>
+
+<p style="text-align:right;color:#57606a;font-size:12px;">
+  작성일: 2026-04-27 &nbsp;|&nbsp; 대상 레포지토리: team-gifticon-releases
+</p>
+

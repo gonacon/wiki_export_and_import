@@ -36,6 +36,17 @@ class RepairBrokenConfluenceLinksTest(unittest.TestCase):
         self.assertIn('<ac:link>', repaired)
         self.assertIn('<ac:link-body>', repaired)
 
+    def test_normalize_ri_attachment_filenames_nfd_to_nfc(self):
+        import unicodedata
+        # NFD format string
+        nfd_filename = unicodedata.normalize('NFD', '비즈콘 Business Flow.png')
+        html = f'<p><ac:image><ri:attachment ri:filename="{nfd_filename}" /></ac:image></p>'
+
+        normalized = Sanitizer.normalize_ri_attachment_filenames(html)
+
+        nfc_filename = unicodedata.normalize('NFC', '비즈콘 Business Flow.png')
+        self.assertIn(f'ri:filename="{nfc_filename}"', normalized)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

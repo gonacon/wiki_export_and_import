@@ -56,6 +56,7 @@ def main(root_dir=None):
             # normalize any remaining ri:attachment refs (remove nested ri:page etc.)
             try:
                 converted_html = Sanitizer.normalize_ri_attachment_refs(converted_html)
+                converted_html = Sanitizer.normalize_ri_attachment_filenames(converted_html)
             except Exception:
                 pass
             with open(out_path, 'w', encoding='utf-8') as f:
