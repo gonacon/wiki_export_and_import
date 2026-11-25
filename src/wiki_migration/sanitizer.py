@@ -21,7 +21,7 @@ class Sanitizer:
     def repair_broken_confluence_links(html_text):
         """깨진 ac:link / ac:link-body 닫는 태그를 제거하고 필요한 닫힘은 보완합니다."""
         token_re = re.compile(
-            r'<(?P<closing>/)?(?P<tag>ac:link-body|ac:link)\b(?P<attrs>[^>]*)?(?P<selfclose>/)?>',
+            r'<(?P<closing>/)?(?P<tag>ac:link-body|ac:link)\b(?P<attrs>[^>]*?)(?P<selfclose>/)?>',
             re.IGNORECASE,
         )
         tracked_tags = {"ac:link", "ac:link-body"}

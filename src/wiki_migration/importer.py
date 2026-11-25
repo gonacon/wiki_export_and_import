@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 import time
+import unicodedata
 from typing import cast
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .config import OLD_BASE, NEW_BASE, NEW_SPACE, NEW_PARENT_PAGE_ID, new_session, EXPORT_DIR, MAX_WORKERS
@@ -13,9 +14,9 @@ from .utils import markdown_to_confluence_html, convert_local_imgs_to_acimage, c
 logger = logging.getLogger('wiki_migrate')
 
 
-def get_page_by_title(title):
+def get_page_by_title(title, space_key=None):
     url = f"{NEW_BASE}/rest/api/content"
-    params = {"title": title, "spaceKey": NEW_SPACE, "expand": "version"}
+    params = {"title": title, "spaceKey": space_key or NEW_SPACE, "expand": "version"}
     try:
         r = new_session.get(url, params=params, timeout=10)
         r.raise_for_status()
@@ -24,17 +25,19 @@ def get_page_by_title(title):
             return resp['results'][0]
     except Exception as e:
         logger.debug(f"페이지 조회 실패 [{title}]: {e}")
+        raise RuntimeError(f"페이지 조회 실패 [{title}] (space={space_key or NEW_SPACE}): {e}") from e
     return None
 
 
-def update_page(page_id, title, body_html, parent=None):
+def update_page(page_id, title, body_html, parent=None, space_key=None):
     url = f"{NEW_BASE}/rest/api/content/{page_id}"
-    r = new_session.get(url, params={'expand': 'version'}, timeout=10)
+    r = new_session.get(url, params={'expand': 'version,space'}, timeout=10)
     r.raise_for_status()
     resp = r.json()
     current_version = resp['version']['number']
+    page_space_key = space_key or resp.get('space', {}).get('key') or NEW_SPACE
     update_data = {
-        'type': 'page', 'title': title, 'space': {'key': NEW_SPACE},
+        'type': 'page', 'title': title, 'space': {'key': page_space_key},
         'body': {'storage': {'value': body_html, 'representation': 'storage'}},
         'version': {'number': current_version + 1}
     }
@@ -48,26 +51,41 @@ def update_page(page_id, title, body_html, parent=None):
 
 
 def create_page(title, body_html, parent=None):
-    existing = get_page_by_title(title)
-    if existing:
-        logger.debug(f"기존 페이지 발견 [{title}] (ID: {existing['id']}) → 업데이트")
-        return update_page(existing['id'], title, body_html, parent)
-    url = f"{NEW_BASE}/rest/api/content"
     # 기본적으로 config의 NEW_SPACE를 사용하되,
     # 부모 페이지(ID)가 주어지면 부모 페이지의 space.key를 우선 사용합니다.
     space_key = NEW_SPACE
+    parent_data = None
     if parent:
-        try:
-            # 부모 페이지 정보를 조회하여 소속 space 키를 가져온다.
-            resp = new_session.get(f"{NEW_BASE}/rest/api/content/{parent}", params={'expand': 'space'}, timeout=10)
-            resp.raise_for_status()
-            pjson = resp.json()
-            parent_space = pjson.get('space', {}).get('key')
-            if parent_space:
-                space_key = parent_space
-        except Exception:
-            # 실패하면 기본 NEW_SPACE를 사용 (로그만 남김)
-            logger.debug(f"부모 페이지({parent})의 space 조회 실패 — NEW_SPACE 사용: {NEW_SPACE}")
+        # 제목 조회와 생성 대상이 달라지지 않도록, 부모의 스페이스를 먼저 확인합니다.
+        resp = new_session.get(
+            f"{NEW_BASE}/rest/api/content/{parent}",
+            params={'expand': 'space,ancestors'},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        parent_data = resp.json()
+        parent_space = parent_data.get('space', {}).get('key')
+        if not parent_space:
+            raise RuntimeError(f"부모 페이지({parent})의 스페이스 정보를 확인할 수 없습니다")
+        space_key = parent_space
+
+    existing = get_page_by_title(title, space_key=space_key)
+    if existing:
+        existing_id = str(existing['id'])
+        parent_ancestor_ids = {
+            str(ancestor.get('id'))
+            for ancestor in (parent_data or {}).get('ancestors', [])
+            if ancestor.get('id') is not None
+        }
+        if parent and (str(parent) == existing_id or existing_id in parent_ancestor_ids):
+            raise RuntimeError(
+                f"부모 페이지({parent})가 기존 페이지[{title}] 자신 또는 하위 페이지입니다. "
+                "페이지를 자기 하위로 이동할 수 없습니다."
+            )
+        logger.debug(f"기존 페이지 발견 [{title}] (ID: {existing['id']}) → 업데이트")
+        return update_page(existing['id'], title, body_html, parent, space_key=space_key)
+
+    url = f"{NEW_BASE}/rest/api/content"
 
     data = {'type': 'page', 'title': title, 'space': {'key': space_key}, 'body': {'storage': {'value': body_html, 'representation': 'storage'}}}
     if parent:
@@ -95,6 +113,37 @@ def upload_attachments(page_id, folder):
     att_path = os.path.join(folder, 'attachments')
     if not os.path.exists(att_path):
         return
+    local_files = [
+        fname for fname in os.listdir(att_path)
+        if fname != 'manifest.json' and os.path.isfile(os.path.join(att_path, fname))
+    ]
+    if not local_files:
+        return
+
+    url = f"{NEW_BASE}/rest/api/content/{page_id}/child/attachment"
+    remote_names = set()
+    start = 0
+    limit = 200
+    try:
+        while True:
+            response = new_session.get(
+                url, params={'limit': limit, 'start': start}, timeout=15
+            )
+            response.raise_for_status()
+            results = response.json().get('results', [])
+            remote_names.update(
+                unicodedata.normalize('NFC', item['title'])
+                for item in results
+                if item.get('title')
+            )
+            if len(results) < limit:
+                break
+            start += len(results)
+    except Exception as e:
+        raise RuntimeError(
+            f"목적지 첨부파일 목록 조회 실패 (page_id={page_id}), 업로드를 중단합니다: {e}"
+        ) from e
+
     # load manifest to map stored filenames -> original titles (if present)
     manifest_path = os.path.join(att_path, 'manifest.json')
     manifest = {}
@@ -106,51 +155,47 @@ def upload_attachments(page_id, folder):
                 title_map = manifest.get('title_map', {}) if isinstance(manifest, dict) else {}
     except Exception:
         title_map = {}
-    for fname in os.listdir(att_path):
-        # skip manifest file and any non-files
-        if fname == 'manifest.json':
-            continue
+    for fname in local_files:
         file_path = os.path.join(att_path, fname)
-        if not os.path.isfile(file_path):
-            continue
         # normalize filename for comparison (macOS may use NFD on disk)
         try:
-            import unicodedata
             fname_norm = unicodedata.normalize('NFC', fname)
         except Exception:
             fname_norm = fname
-        url = f"{NEW_BASE}/rest/api/content/{page_id}/child/attachment"
+        upload_name = fname
+        # reverse title_map: stored_name -> title
+        # title_map typically maps title -> stored name; build reverse
+        try:
+            for title, stored in title_map.items():
+                try:
+                    stored_norm = unicodedata.normalize('NFC', stored)
+                except Exception:
+                    stored_norm = stored
+                if stored_norm == fname_norm:
+                    upload_name = title
+                    break
+        except Exception:
+            pass
+
+        normalized_upload_name = unicodedata.normalize('NFC', upload_name)
+        if normalized_upload_name in remote_names:
+            logger.info(f"이미 존재하는 첨부파일 업로드 생략 [{upload_name}] (page_id={page_id})")
+            continue
+
         try:
             with open(file_path, 'rb') as f:
-                # If we have an original title for this stored filename, upload using the original title
-                # so that page references (ri:attachment ri:filename="original.jpg") match uploaded attachments.
-                upload_name = fname
-                # reverse title_map: stored_name -> title
-                # title_map typically maps title -> stored_name; build reverse
-                try:
-                    # title_map values are stored names; find title whose value equals fname
-                    for t, stored in title_map.items():
-                        try:
-                            stored_norm = unicodedata.normalize('NFC', stored)
-                        except Exception:
-                            stored_norm = stored
-                        if stored_norm == fname_norm:
-                            upload_name = t
-                            break
-                except Exception:
-                    pass
-
                 r = new_session.post(url, files={'file': (upload_name, f)}, headers={'X-Atlassian-Token': 'no-check'})
                 try:
                     status = getattr(r, 'status_code', None)
                     if status and status >= 400:
                         logger.error(f"첨부파일 업로드 응답 에러 [{upload_name}] status={status} text={r.text}")
                     else:
+                        remote_names.add(normalized_upload_name)
                         logger.debug(f"첨부파일 업로드: stored={fname} upload_as={upload_name} status={status}")
                 except Exception:
                     logger.debug(f"첨부파일 업로드(응답 로그) 실패: {fname}")
         except Exception as e:
-             logger.error(f"첨부파일 업로드 실패 [{fname}]: {e}")
+            logger.error(f"첨부파일 업로드 실패 [{fname}]: {e}")
 
 
 def build_page_hierarchy(pages_dir):
@@ -423,17 +468,18 @@ def upload_page(old_id, pages_info, page_map, parent_new_id, inline_images, forc
 def update_page_parent_only(page_id, title, parent_id):
     """페이지의 부모만 변경 (내용은 그대로)"""
     url = f"{NEW_BASE}/rest/api/content/{page_id}"
-    r = new_session.get(url, params={'expand': 'version,body.storage'}, timeout=10)
+    r = new_session.get(url, params={'expand': 'version,body.storage,space'}, timeout=10)
     r.raise_for_status()
     resp = r.json()
 
     current_version = resp['version']['number']
     current_body = resp['body']['storage']['value']
+    page_space_key = resp.get('space', {}).get('key') or NEW_SPACE
 
     update_data = {
         'type': 'page',
         'title': title,
-        'space': {'key': NEW_SPACE},
+        'space': {'key': page_space_key},
         'body': {'storage': {'value': current_body, 'representation': 'storage'}},
         'version': {'number': current_version + 1},
         'ancestors': [{'id': parent_id}]
@@ -658,11 +704,13 @@ def import_all_two_pass(inline_images=False, force_update=False, root_page_id=No
             if str(old_id) in page_map and not force_update:
                 return page_map[str(old_id)]
 
-        # determine parent_new_id
+        # The explicitly selected parent takes precedence for the selected subtree root.
         parent_old = meta.get('parent')
         parent_new = None
         with page_map_lock:
-            if parent_old and str(parent_old) in page_map:
+            if parent_id and root_page_id and str(old_id) == str(root_page_id):
+                parent_new = parent_id
+            elif parent_old and str(parent_old) in page_map:
                 parent_new = page_map[str(parent_old)]
             elif not parent_old and parent_id:
                 parent_new = parent_id
@@ -778,11 +826,13 @@ def import_all_two_pass(inline_images=False, force_update=False, root_page_id=No
             html_body = convert_local_imgs_to_acimage(html_body)
             html_body = Sanitizer.normalize_ri_attachment_filenames(html_body)
 
-            # determine parent_new_id
+            # Keep the selected subtree root under the explicitly requested parent.
             parent_new_id = None
             parent_old = meta.get('parent')
             with page_map_lock:
-                if parent_old and str(parent_old) in page_map:
+                if parent_id and root_page_id and str(old_id) == str(root_page_id):
+                    parent_new_id = parent_id
+                elif parent_old and str(parent_old) in page_map:
                     parent_new_id = page_map[str(parent_old)]
                 elif not parent_old and parent_id:
                     parent_new_id = parent_id
